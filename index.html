@@ -1,0 +1,230 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#173f32">
+  <title>CattleCare | Sustainable Farm Management</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#" aria-label="CattleCare home">
+        <span class="brand-mark">✿</span>
+        <span>
+          <strong>CattleCare</strong>
+          <small>GROW WITH NATURE</small>
+        </span>
+      </a>
+
+      <div class="farm-label">FARM WORKSPACE</div>
+      <nav class="navigation">
+        <button class="nav-link active" data-page="dashboard"><span>⌂</span> Overview</button>
+        <button class="nav-link" data-page="cattle"><span>♧</span> My Cattle</button>
+        <button class="nav-link" data-page="vaccinations"><span>✚</span> Vaccinations</button>
+        <button class="nav-link" data-page="qr"><span>▦</span> QR Station</button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="eco-card">
+          <span class="eco-icon">☀</span>
+          <strong>Growing naturally</strong>
+          <p>Healthy animals. A healthier planet.</p>
+          <div class="eco-decoration">❧</div>
+        </div>
+        <div class="sidebar-footer">Made with care <span>♥</span></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <button class="mobile-menu" id="menuToggle" aria-label="Toggle menu">☰</button>
+        <div class="breadcrumb">Farm workspace <span>/</span> <strong id="pageCrumb">Overview</strong></div>
+        <div class="topbar-right">
+          <span class="live-dot"></span>
+          <span class="live-label">Farm system active</span>
+          <div class="avatar">🌱</div>
+        </div>
+      </header>
+
+      <section class="page active" id="dashboardPage">
+        <div class="welcome-banner">
+          <div class="welcome-copy">
+            <span class="eyebrow">✦ YOUR FARM, IN HARMONY</span>
+            <h1>A greener way to<br><em>care for your cattle.</em></h1>
+            <p>Keep your herd healthy, organised and thriving with a little help from nature and technology.</p>
+            <button class="primary-button" data-go="cattle">Explore your herd <span>↗</span></button>
+          </div>
+          <div class="welcome-art" aria-hidden="true">
+            <div class="sun"></div>
+            <div class="hill hill-back"></div>
+            <div class="hill hill-front"></div>
+            <div class="art-plant plant-one">♧</div>
+            <div class="art-plant plant-two">❧</div>
+            <div class="art-cow">🐄</div>
+            <div class="art-caption">A little care<br>goes a long way.</div>
+          </div>
+          <span class="banner-sparkle sparkle-one">✳</span>
+          <span class="banner-sparkle sparkle-two">✦</span>
+        </div>
+
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">YOUR FARM AT A GLANCE</span>
+            <h2>Today's overview</h2>
+          </div>
+          <span class="date-chip" id="todayDate"></span>
+        </div>
+
+        <div class="stats-grid">
+          <article class="stat-card stat-green">
+            <div class="stat-top"><span>Total cattle</span><span class="stat-icon">🐄</span></div>
+            <strong id="totalCattle">0</strong>
+            <small>Registered in your farm</small>
+          </article>
+          <article class="stat-card stat-mint">
+            <div class="stat-top"><span>Healthy cattle</span><span class="stat-icon">♡</span></div>
+            <strong id="healthyCattle">0</strong>
+            <small>Marked healthy</small>
+          </article>
+          <article class="stat-card stat-yellow">
+            <div class="stat-top"><span>Vaccinations due</span><span class="stat-icon">✚</span></div>
+            <strong id="dueVaccinations">0</strong>
+            <small>Due today or overdue</small>
+          </article>
+          <article class="stat-card stat-lilac">
+            <div class="stat-top"><span>Vaccines recorded</span><span class="stat-icon">✿</span></div>
+            <strong id="totalVaccines">0</strong>
+            <small>Vaccination entries</small>
+          </article>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel upcoming-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">DON'T MISS A DATE</span><h3>Upcoming care</h3></div>
+              <button class="text-button" data-go="vaccinations">View all ↗</button>
+            </div>
+            <div id="upcomingList" class="upcoming-list">
+              <div class="empty-state">🌱 <strong>Nothing scheduled yet</strong><span>Add a cattle record and vaccination date to see reminders here.</span></div>
+            </div>
+          </section>
+
+          <section class="panel health-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">HERD WELLNESS</span><h3>Health snapshot</h3></div>
+              <span class="health-leaf">✿</span>
+            </div>
+            <div class="health-visual">
+              <div class="health-ring" id="healthRing"><div><strong id="healthPercent">0%</strong><small>Healthy</small></div></div>
+              <div class="health-legend">
+                <p><i class="legend-dot healthy-dot"></i> Healthy <strong id="legendHealthy">0</strong></p>
+                <p><i class="legend-dot attention-dot"></i> Needs attention <strong id="legendAttention">0</strong></p>
+              </div>
+            </div>
+            <p class="panel-note">Keep a close eye on your herd. Update health status whenever a check-up is completed.</p>
+          </section>
+        </div>
+
+        <section class="panel recent-panel">
+          <div class="panel-heading">
+            <div><span class="eyebrow">FRESH FROM THE FARM</span><h3>Recently registered</h3></div>
+            <button class="text-button" data-go="cattle">All cattle ↗</button>
+          </div>
+          <div id="recentCattle" class="recent-grid">
+            <div class="empty-state">🐄 <strong>Your herd starts here</strong><span>Register your first animal to see it here.</span></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="page" id="cattlePage">
+        <div class="page-heading">
+          <div><span class="eyebrow">YOUR FARM FAMILY</span><h1>My cattle <em>collection.</em></h1><p>Every animal has a story. Keep their details close.</p></div>
+          <button class="primary-button" id="openFormButton">＋ Register cattle</button>
+        </div>
+
+        <div class="toolbar">
+          <label class="search-box"><span>⌕</span><input id="cattleSearch" type="search" placeholder="Search by name, ID or breed..."></label>
+          <select id="healthFilter" aria-label="Filter by health status">
+            <option value="all">All health statuses</option>
+            <option value="Healthy">Healthy</option>
+            <option value="Needs attention">Needs attention</option>
+          </select>
+        </div>
+        <div class="result-count" id="cattleCount">0 animals</div>
+        <div class="cattle-grid" id="cattleGrid">
+          <div class="empty-state">🌿 <strong>No cattle registered yet</strong><span>Start building your herd by registering an animal.</span></div>
+        </div>
+      </section>
+
+      <section class="page" id="vaccinationsPage">
+        <div class="page-heading">
+          <div><span class="eyebrow">PREVENTION IS BETTER THAN CURE</span><h1>Vaccination <em>calendar.</em></h1><p>Stay ahead of every important health milestone.</p></div>
+        </div>
+        <div class="vaccine-summary" id="vaccineSummary"></div>
+        <div class="panel">
+          <div class="panel-heading"><div><span class="eyebrow">HERD HEALTH RECORDS</span><h3>Vaccination schedule</h3></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Animal</th><th>Vaccine</th><th>Last given</th><th>Next date</th><th>Status</th></tr></thead>
+              <tbody id="vaccineTable"><tr><td colspan="5" class="table-empty">No vaccination records yet.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" id="qrPage">
+        <div class="page-heading">
+          <div><span class="eyebrow">A DIGITAL ID FOR EVERY ANIMAL</span><h1>QR <em>station.</em></h1><p>Download an animal's QR code for quick access to its identification details.</p></div>
+        </div>
+        <div class="qr-grid" id="qrGrid">
+          <div class="empty-state">▦ <strong>No QR codes yet</strong><span>Register cattle to create their individual QR codes.</span></div>
+        </div>
+      </section>
+
+      <footer class="app-footer">
+        <span>✿ CattleCare</span>
+        <span>Designed for a greener tomorrow · <span id="footerYear"></span></span>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Registration / edit modal -->
+  <div class="modal-backdrop" id="animalModal" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-header">
+        <div><span class="eyebrow">A NEW MEMBER OF THE HERD</span><h2 id="modalTitle">Register cattle</h2></div>
+        <button class="close-button" id="closeModal" aria-label="Close">×</button>
+      </div>
+      <form id="animalForm">
+        <input type="hidden" id="animalId">
+        <div class="form-grid">
+          <label>Animal name *<input id="animalName" required maxlength="50" placeholder="e.g. Daisy"></label>
+          <label>Animal ID *<input id="animalTag" required maxlength="30" placeholder="e.g. COW-001"></label>
+          <label>Breed<input id="animalBreed" maxlength="50" placeholder="e.g. Holstein Friesian"></label>
+          <label>Date of birth<input id="animalDob" type="date"></label>
+          <label>Health status
+            <select id="animalHealth"><option>Healthy</option><option>Needs attention</option></select>
+          </label>
+          <label>Last vaccination date<input id="lastVaccineDate" type="date"></label>
+          <label>Vaccine name<input id="vaccineName" maxlength="70" placeholder="e.g. FMD vaccine"></label>
+          <label>Next vaccination date<input id="nextVaccineDate" type="date"></label>
+          <label class="full-field">Doctor notes<textarea id="doctorNotes" rows="3" maxlength="1000" placeholder="Health observations, treatment and notes..."></textarea></label>
+          <label class="full-field">Animal photo<input id="animalPhoto" type="file" accept="image/*"><small class="field-hint">Choose a JPG or PNG image. Large photos are resized before saving.</small></label>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="secondary-button" id="cancelForm">Cancel</button>
+          <button type="submit" class="primary-button">Save animal <span>↗</span></button>
+        </div>
+        <p class="form-message" id="formMessage" role="status"></p>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="script.js"></script>
+</body>
+</html>
