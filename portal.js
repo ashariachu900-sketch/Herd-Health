@@ -12,7 +12,7 @@ const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://loca
 const MS_PER_DAY = 86_400_000;
 
 /** Only allow small data-URI images to be injected into an <img src>. */
-const SAFE_PHOTO = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
 let animals = [];
 let isBackendConnected = false;
@@ -37,7 +37,7 @@ async function init() {
   if (animalTag) {
     const found = animals.find(a => (a.tag || "").toLowerCase() === animalTag.toLowerCase());
     if (found) {
-      showPassport(found);
+      await showPassport(found);
       return;
     }
     showMissingRecord(animalTag);
@@ -45,7 +45,7 @@ async function init() {
   } else if (animalId) {
     const found = animals.find(a => a.id === animalId);
     if (found) {
-      showPassport(found);
+      await showPassport(found);
       return;
     }
     showMissingRecord(animalId);
@@ -54,6 +54,7 @@ async function init() {
 
   // Otherwise, render full herd directory
   renderDirectory();
+  await hydratePhotos();
 }
 
 function showMissingRecord(key) {
@@ -71,7 +72,7 @@ async function syncAnimals() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
 
-    const res = await fetch(`${API_BASE}/api/animals`, { signal: controller.signal });
+    const res = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (res.ok) {
@@ -94,6 +95,28 @@ async function syncAnimals() {
   } catch {
     animals = [];
   }
+}
+
+/** Load the full record only when a directory card with a photo is actually shown. */
+async function ensurePhoto(animal) {
+  if (!animal || animal.photo || !animal.hasPhoto || !isBackendConnected) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animal.id)}`);
+    if (res.ok) {
+      const full = await res.json();
+      animal.photo = full.photo || "";
+    }
+  } catch {
+    // Keep the cow placeholder; the rest of the passport still renders.
+  }
+}
+
+/** Hydrate photos after a summary list load, then redraw the directory once. */
+async function hydratePhotos() {
+  const needed = animals.filter(a => a.hasPhoto && !a.photo);
+  if (!needed.length) return;
+  await Promise.all(needed.map(ensurePhoto));
+  renderDirectory();
 }
 
 // -----------------------------------------------------------------------------
@@ -270,7 +293,8 @@ function renderDirectory() {
 // Animal Passport View (Detailed Digital Certificate)
 // -----------------------------------------------------------------------------
 
-function showPassport(animal) {
+async function showPassport(animal) {
+  await ensurePhoto(animal);
   $("directorySection").style.display = "none";
   $("missingRecord").hidden = true;
   document.body.classList.add("passport-open");
@@ -334,10 +358,10 @@ function showPassport(animal) {
     : "No veterinary verification on file";
 }
 
-window.openPassportById = function(id) {
+function openPassportById(id) {
   const animal = animals.find(a => a.id === id);
   if (animal) showPassport(animal);
-};
+}
 
 // -----------------------------------------------------------------------------
 // Event Handlers
@@ -374,7 +398,7 @@ function setupEventListeners() {
   // Back to Directory
   $("backToDirectory").addEventListener("click", () => {
     window.history.pushState({}, "", window.location.pathname);
-    renderDirectory();
+    hydratePhotos();
   });
 
   // Print Certificate

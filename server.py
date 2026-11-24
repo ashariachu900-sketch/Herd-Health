@@ -1,18 +1,24 @@
 """
 CattleCare Backend Server
 A hardened, multi-threaded REST API server and static file server
-powered by Python's standard library (ThreadingHTTPServer + sqlite3 with WAL mode).
+powered by Python's standard library (ThreadingHTTPServer + sqlite3 in WAL mode).
 
 Endpoints:
-  GET    /api/animals       - List all animals (supports ?search=, ?tag=, and ?health=)
-  GET    /api/animals/<id>  - Get a single animal by ID or tag
-  POST   /api/animals       - Create a new animal record
-  PUT    /api/animals/<id>  - Update an animal record (preserves existing photo)
-  DELETE /api/animals/<id>  - Delete an animal record
-  GET    /api/stats         - Dashboard overview statistics and upcoming care
-  GET    /api/health        - Server health check
-  GET    /api/export        - Export full herd backup as JSON
-  Static files              - Serves index.html, portal.html, style.css, script.js, etc.
+  GET    /api/health              - Liveness check
+  GET    /api/animals             - List; ?search=, ?tag=, ?health=, ?summary=true, ?limit=, ?offset=
+  GET    /api/animals/<id>        - Get one record by ID or tag (includes photo path)
+  POST   /api/animals             - Create (admin token; server-generated id/createdAt)
+  PUT    /api/animals/<id>        - Update (admin token; photo/verification preserved when omitted)
+  DELETE /api/animals/<id>        - Delete (admin token)
+  POST   /api/animals/<id>/verify - Vet verification (vet token; writes audit log)
+  GET    /api/stats               - Dashboard aggregates
+  GET    /api/export              - Full JSON backup (admin token)
+  GET    /uploads/<file>          - Uploaded animal photos
+  Static files                   - index.html, portal.html, CSS, JS
+
+FARM_ADMIN_TOKEN and FARM_VET_TOKEN are both required at startup. There are no
+default credentials. Requests are rate-limited by a bounded semaphore and a
+10-second socket timeout. For public access, use a TLS reverse proxy.
 """
 
 import os
@@ -20,21 +26,29 @@ import re
 import hmac
 import json
 import uuid
+import base64
+import threading
 import sqlite3
 import datetime
 import urllib.parse
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 PORT = int(os.environ.get("PORT", 8000))
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cattlecare.db")
-STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "cattlecare.db")
+STATIC_DIR = BASE_DIR
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 MAX_BODY_SIZE = 5 * 1024 * 1024  # 5 MB payload limit (anti-DoS)
 
-# No hardcoded fallback: the token must come from the environment (see run_server.bat / .env.example).
+# No hardcoded fallback: tokens must come from the environment (see .env.example).
 ADMIN_TOKEN = os.environ.get("FARM_ADMIN_TOKEN")
-PHOTO_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$")
+VET_TOKEN = os.environ.get("FARM_VET_TOKEN")
+PHOTO_DATA_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/=]+)$")
+PHOTO_PATH_RE = re.compile(r"^/uploads/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp)$")
 HEALTH_VALUES = ("Healthy", "Needs attention")
 FIELD_LIMITS = {"name": 50, "tag": 30, "breed": 50, "vaccineName": 70, "notes": 1000}
+MAX_CONCURRENT_REQUESTS = 32
+REQUEST_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
@@ -80,6 +94,17 @@ def init_db():
         )
     """)
     ensure_columns(conn)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS verification_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            animalId TEXT NOT NULL,
+            verifiedBy TEXT NOT NULL,
+            verifiedAt TEXT NOT NULL,
+            actor TEXT NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verification_animal ON verification_log (animalId);")
 
     # Performance indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_created ON animals (createdAt DESC);")
@@ -197,9 +222,29 @@ def clean_animal_fields(data):
         fields[key] = value
 
     fields["photo"] = str(data.get("photo") or "")
-    if fields["photo"] and not PHOTO_RE.fullmatch(fields["photo"]):
-        return None, "Photo must be a small base64-encoded PNG/JPEG/GIF/WebP image."
+    if fields["photo"] and not (
+        PHOTO_DATA_RE.fullmatch(fields["photo"]) or PHOTO_PATH_RE.fullmatch(fields["photo"])
+    ):
+        return None, "Photo must be a small base64 image or an existing /uploads/ path."
     return fields, None
+
+def persist_photo(photo):
+    """Write a base64 data URI to disk and return its public path. Existing paths pass through."""
+    if not photo:
+        return ""
+    if PHOTO_PATH_RE.fullmatch(photo):
+        return photo
+    match = PHOTO_DATA_RE.fullmatch(photo)
+    if not match:
+        raise ValueError("Invalid photo format")
+    mime_ext = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp"}
+    extension = mime_ext[match.group(1)]
+    file_name = f"{uuid.uuid4()}.{extension}"
+    encoded = match.group(2)
+    encoded += "=" * (-len(encoded) % 4)  # tolerate data URIs without padding
+    with open(os.path.join(UPLOAD_DIR, file_name), "wb") as handle:
+        handle.write(base64.b64decode(encoded, validate=True))
+    return f"/uploads/{file_name}"
 
 def day_difference(date_str):
     if not date_str:
@@ -224,6 +269,15 @@ def vaccine_status(date_str):
 class CattleRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(10)  # slow clients cannot hold a thread forever
+
+    def handle_one_request(self):
+        # Cap concurrent requests; ThreadingHTTPServer otherwise spawns unbounded threads.
+        with REQUEST_SEMAPHORE:
+            return super().handle_one_request()
 
     # This app is served from the same origin as its API, so no CORS headers are
     # needed. Wildcard CORS on write endpoints would let other sites call this API.
@@ -267,6 +321,16 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(401, {"error": "Unauthorized: Valid X-Admin-Token required."})
         return False
 
+    def check_vet_auth(self):
+        token = self.headers.get("X-Vet-Token")
+        if not token:
+            authorization = self.headers.get("Authorization", "")
+            token = authorization.removeprefix("Bearer ").strip()
+        if VET_TOKEN and token and hmac.compare_digest(token, VET_TOKEN):
+            return True
+        self.send_json(401, {"error": "Unauthorized: Valid X-Vet-Token required."})
+        return False
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -301,11 +365,16 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/stats":
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM animals ORDER BY createdAt DESC")
+            # Only the columns needed for aggregates — never load photo/notes blobs here.
+            cursor.execute("""
+                SELECT id, name, tag, health, vaccineName, lastVaccineDate,
+                       nextVaccineDate, createdAt
+                FROM animals
+            """)
             rows = cursor.fetchall()
             conn.close()
 
-            animals = [row_to_dict(r) for r in rows]
+            animals = [dict(r) for r in rows]
             total = len(animals)
             healthy = sum(1 for a in animals if a["health"] == "Healthy")
             attention = total - healthy
@@ -339,6 +408,10 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             # ?summary=true — omit large base64 photo blobs from list responses.
             # Callers that need the full photo should fetch /api/animals/<id>.
             summary_mode = query.get("summary", ["false"])[0].strip().lower() == "true"
+            limit_raw = query.get("limit", [""])[0]
+            offset_raw = query.get("offset", [""])[0]
+            limit = min(max(int(limit_raw), 1), 200) if limit_raw.isdigit() else None
+            offset = max(int(offset_raw), 0) if offset_raw.isdigit() else 0
 
             # Filter in SQL so indexes are used and rows aren't all loaded into memory.
             clauses, params = [], []
@@ -357,6 +430,9 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if clauses:
                 sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY createdAt DESC"
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
 
             conn = get_db()
             cursor = conn.cursor()
@@ -421,25 +497,33 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        # Vet verification: marks a record as checked by a named professional.
+        # Vet verification requires a separate vet token and writes an audit row.
         if path.startswith("/api/animals/") and path.endswith("/verify"):
-            if not self.check_auth():
+            if not self.check_vet_auth():
                 return
             animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/verify")].strip())
             data = self.parse_json_body()
             if data is None or data == "ERROR":
                 return
-            verified_by = str(data.get("verifiedBy") or "Veterinarian").strip()[:50]
+            verified_by = str(data.get("verifiedBy") or "").strip()[:50]
+            if not verified_by:
+                self.send_json(400, {"error": "verifiedBy is required for verification."})
+                return
+            verified_at = datetime.datetime.now().isoformat()
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE animals SET verified = 1, verifiedBy = ?, verifiedAt = ?
                 WHERE id = ? OR LOWER(tag) = LOWER(?)
-            """, (verified_by, datetime.datetime.now().isoformat(), animal_id, animal_id))
+            """, (verified_by, verified_at, animal_id, animal_id))
             if cursor.rowcount == 0:
                 conn.close()
                 self.send_json(404, {"error": "Animal not found"})
                 return
+            cursor.execute("""
+                INSERT INTO verification_log (animalId, verifiedBy, verifiedAt, actor)
+                VALUES (?, ?, ?, ?)
+            """, (animal_id, verified_by, verified_at, "vet-token"))
             conn.commit()
             cursor.execute("SELECT * FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
             updated = row_to_dict(cursor.fetchone())
@@ -463,6 +547,11 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             # IDs and timestamps are generated here, never trusted from the client.
             animal_id = str(uuid.uuid4())
             created_at = datetime.datetime.now().isoformat()
+            try:
+                photo_path = persist_photo(fields["photo"])
+            except (ValueError, OSError) as exc:
+                self.send_json(400, {"error": f"Could not store photo: {exc}"})
+                return
 
             conn = get_db()
             cursor = conn.cursor()
@@ -485,7 +574,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     animal_id,
                     fields["name"], fields["tag"], fields["breed"], fields["dob"],
                     fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
-                    fields["nextVaccineDate"], fields["notes"], fields["photo"], created_at
+                    fields["nextVaccineDate"], fields["notes"], photo_path, created_at
                 ))
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -541,7 +630,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             # Keep existing photo if new photo is empty or omitted; verification is never overwritten here.
-            photo_to_save = fields["photo"] or current["photo"]
+            try:
+                photo_to_save = persist_photo(fields["photo"]) or current["photo"]
+            except (ValueError, OSError) as exc:
+                conn.close()
+                self.send_json(400, {"error": f"Could not store photo: {exc}"})
+                return
 
             cursor.execute("""
                 UPDATE animals SET
@@ -605,9 +699,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(404, {"error": "Endpoint not found"})
 
 def run_server(port=PORT):
-    if not ADMIN_TOKEN:
+    missing = [name for name, value in (
+        ("FARM_ADMIN_TOKEN", ADMIN_TOKEN), ("FARM_VET_TOKEN", VET_TOKEN)
+    ) if not value]
+    if missing:
         raise SystemExit(
-            "FARM_ADMIN_TOKEN is not set. Set it before starting the server "
+            f"{', '.join(missing)} not set. Set both before starting the server "
             "(see .env.example and README.md)."
         )
     init_db()

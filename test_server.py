@@ -21,6 +21,7 @@ from http.server import ThreadingHTTPServer
 import server
 
 TEST_TOKEN = "unit-test-token"
+TEST_VET_TOKEN = "unit-test-vet-token"
 
 class InProcessTestClient:
     """Simulates HTTP requests into CattleRequestHandler without requiring OS TCP sockets."""
@@ -68,10 +69,14 @@ class CattleCareBackendTests(unittest.TestCase):
         cls.test_db = os.path.join(cls.test_dir, "test_cattlecare.db")
         cls.original_db_path = server.DB_PATH
         cls.original_token = server.ADMIN_TOKEN
+        cls.original_vet_token = server.VET_TOKEN
+        cls.original_upload_dir = server.UPLOAD_DIR
         cls.original_seed = os.environ.get("SEED_DEMO_DATA")
         os.environ["SEED_DEMO_DATA"] = "1"  # seed the isolated test database
         server.DB_PATH = cls.test_db
         server.ADMIN_TOKEN = TEST_TOKEN
+        server.VET_TOKEN = TEST_VET_TOKEN
+        server.UPLOAD_DIR = os.path.join(cls.test_dir, "uploads")
         server.init_db()
         cls.client = InProcessTestClient()
 
@@ -79,6 +84,8 @@ class CattleCareBackendTests(unittest.TestCase):
     def tearDownClass(cls):
         server.DB_PATH = cls.original_db_path
         server.ADMIN_TOKEN = cls.original_token
+        server.VET_TOKEN = cls.original_vet_token
+        server.UPLOAD_DIR = cls.original_upload_dir
         if cls.original_seed is None:
             os.environ.pop("SEED_DEMO_DATA", None)
         else:
@@ -190,7 +197,7 @@ class CattleCareBackendTests(unittest.TestCase):
         status, updated = self.client.request("PUT", f"/api/animals/{created_id}", data=update)
         self.assertEqual(status, 200)
         self.assertEqual(updated["name"], "Moona Champion")
-        self.assertEqual(updated["photo"], "data:image/jpeg;base64,samplephoto123")
+        self.assertTrue(updated["photo"].startswith("/uploads/"))
 
         status, _ = self.client.request("DELETE", f"/api/animals/{created_id}")
         self.assertEqual(status, 200)
@@ -267,12 +274,22 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertFalse(created["verified"])
 
         status, verified = self.client.request(
-            "POST", f"/api/animals/{aid}/verify", {"verifiedBy": "Dr Rao"}
+            "POST", f"/api/animals/{aid}/verify", {"verifiedBy": "Dr Rao"},
+            headers={"X-Vet-Token": TEST_VET_TOKEN}
         )
         self.assertEqual(status, 200)
         self.assertTrue(verified["verified"])
         self.assertEqual(verified["verifiedBy"], "Dr Rao")
         self.assertTrue(verified["verifiedAt"])
+
+        conn = server.get_db()
+        logs = conn.execute(
+            "SELECT verifiedBy, actor FROM verification_log WHERE animalId = ?", (aid,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["verifiedBy"], "Dr Rao")
+        self.assertEqual(logs[0]["actor"], "vet-token")
 
         status, updated = self.client.request(
             "PUT", f"/api/animals/{aid}", {"name": "VerifyMe II", "tag": "VER-001"}
@@ -327,6 +344,38 @@ class CattleCareBackendTests(unittest.TestCase):
             else:
                 os.environ["SEED_DEMO_DATA"] = original_seed
             shutil.rmtree(fresh_dir, ignore_errors=True)
+
+    def test_18_admin_token_cannot_verify(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "NoVet", "tag": "NOVET-001"}
+        )
+        self.assertEqual(status, 201)
+        aid = created["id"]
+        status, body = self.client.request(
+            "POST", f"/api/animals/{aid}/verify", {"verifiedBy": "Farmer"},
+            headers={"X-Vet-Token": TEST_TOKEN}  # admin token reused as vet token -> reject
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("X-Vet-Token", body["error"])
+        self.client.request("DELETE", f"/api/animals/{aid}")
+
+    def test_19_client_backup_sends_admin_token(self):
+        src_path = os.path.join(server.STATIC_DIR, "script.js")
+        with open(src_path, "r", encoding="utf-8") as handle:
+            src = handle.read()
+        self.assertIn('headers: { "X-Admin-Token": getAdminToken() }', src)
+        self.assertNotIn('fetch(`${API_BASE}/api/export`)', src)
+
+    def test_20_pagination_and_summary(self):
+        status, first = self.client.request("GET", "/api/animals?summary=true&limit=1&offset=0")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(first), 1)
+        self.assertNotIn("photo", first[0])
+
+        status, second = self.client.request("GET", "/api/animals?summary=true&limit=1&offset=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(first[0]["id"], second[0]["id"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

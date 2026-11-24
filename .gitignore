@@ -10,6 +10,9 @@ __pycache__/
 *.sqlite3
 *.sqlite3-*
 
+# Uploaded animal photos
+uploads/
+
 # Editor directories and files
 .vscode/
 .idea/

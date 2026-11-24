@@ -13,29 +13,40 @@ const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://loca
 const MS_PER_DAY = 86_400_000;
 
 /** Only allow small data-URI images to be injected into an <img src>. */
-const SAFE_PHOTO = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
 // -----------------------------------------------------------------------------
 // Admin Token — stored in sessionStorage; prompts once per browser session
 // -----------------------------------------------------------------------------
 
 /**
- * Returns the farm admin passcode.
- * On first call in the session, shows a prompt dialog and caches the result.
- * Clears the cached token and re-prompts if the value is empty / cancelled.
- *
- * @returns {string} The admin token (may be empty string if user cancels).
+ * Returns the farm admin passcode from sessionStorage or the top-bar input.
+ * No blocking prompt(): the user types the passcode once per browser session.
+ * @returns {string} The admin token, or "" if it has not been entered yet.
  */
 function getAdminToken() {
-  let token = sessionStorage.getItem("farm_admin_token");
+  const cached = sessionStorage.getItem("farm_admin_token");
+  if (cached) return cached;
+
+  const input = $("adminTokenInput");
+  const token = (input?.value || "").trim();
   if (!token) {
-    token = prompt("Enter Farm Administrator Passcode:");
-    if (token) {
-      sessionStorage.setItem("farm_admin_token", token.trim());
-      token = token.trim();
-    }
+    input?.focus();
+    showToast("Enter the admin passcode in the top bar first.");
+    return "";
   }
-  return token || "";
+  sessionStorage.setItem("farm_admin_token", token);
+  return token;
+}
+
+/** Forget a rejected token so the user can correct it without reloading. */
+function clearAdminToken() {
+  sessionStorage.removeItem("farm_admin_token");
+  const input = $("adminTokenInput");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
 }
 
 let animals = [];
@@ -83,12 +94,34 @@ function saveLocalAnimals() {
   }
 }
 
+/** Fetch photo bytes only for records shown with a photo but no loaded image. */
+async function ensurePhoto(animal) {
+  if (!animal || animal.photo || !animal.hasPhoto || !isBackendConnected) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animal.id)}`);
+    if (res.ok) {
+      const full = await res.json();
+      animal.photo = full.photo || "";
+    }
+  } catch {
+    // Leave the placeholder in place; the record itself is still readable.
+  }
+}
+
+/** Hydrate photos after a summary list load, then redraw once. */
+async function hydratePhotos() {
+  const needed = animals.filter(a => a.hasPhoto && !a.photo);
+  if (!needed.length) return;
+  await Promise.all(needed.map(ensurePhoto));
+  renderAll();
+}
+
 async function syncAnimals() {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
 
-    const response = await fetch(`${API_BASE}/api/animals`, {
+    const response = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`, {
       signal: controller.signal
     });
     clearTimeout(timeout);
@@ -161,8 +194,9 @@ function showToast(message) {
 
 let lastFocusedElement = null;
 
-function openModal(animal = null) {
+async function openModal(animal = null) {
   lastFocusedElement = document.activeElement;
+  if (animal) await ensurePhoto(animal);
   $("animalForm").reset();
   $("animalId").value = animal?.id || "";
   $("modalTitle").textContent = animal ? "Update cattle details" : "Register cattle";
@@ -258,7 +292,6 @@ $("animalForm").addEventListener("submit", async (event) => {
   }
 
   const payload = {
-    id: existingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
     name,
     tag,
     breed: $("animalBreed").value.trim(),
@@ -268,8 +301,7 @@ $("animalForm").addEventListener("submit", async (event) => {
     vaccineName: $("vaccineName").value.trim(),
     nextVaccineDate: $("nextVaccineDate").value,
     notes: $("doctorNotes").value.trim(),
-    photo,
-    createdAt: existing?.createdAt || new Date().toISOString()
+    photo
   };
 
   // Offline writes are disabled on purpose: a local-only edit would be silently
@@ -297,12 +329,18 @@ $("animalForm").addEventListener("submit", async (event) => {
     });
 
     const data = await res.json();
+    if (res.status === 401) {
+      clearAdminToken();
+      $("formMessage").textContent = "Wrong admin passcode. Re-enter it and try again.";
+      return;
+    }
     if (!res.ok) {
       $("formMessage").textContent = data.error || "Failed to save animal record.";
       return;
     }
 
     await syncAnimals();
+    await hydratePhotos();
 
     closeModal();
     renderAll();
@@ -334,13 +372,18 @@ async function deleteAnimal(id) {
       method: "DELETE",
       headers: { "X-Admin-Token": getAdminToken() }
     });
+    if (res.status === 401) {
+      clearAdminToken();
+      showToast("Wrong admin passcode. Re-enter it and try again.");
+      return;
+    }
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       showToast("Delete failed: " + (errData.error || "Server error"));
       return;
     }
     await syncAnimals();
-    renderAll();
+    await hydratePhotos();
     showToast("Animal record deleted from database.");
   } catch (e) {
     showToast("Network error deleting animal: " + e.message);
@@ -675,40 +718,46 @@ $("menuToggle").addEventListener("click", () => {
 const backupBtn = $("exportBackupBtn");
 if (backupBtn) {
   backupBtn.addEventListener("click", async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/export`);
-      if (!res.ok) throw new Error("Server export returned error");
-      const data = await res.json();
+    const download = (data, fileName) => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      const dateStr = new Date().toISOString().split("T")[0];
       a.href = url;
-      a.download = `cattlecare_backup_${dateStr}.json`;
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      showToast("Herd database backup downloaded! 💾");
+    };
+    const dateStr = new Date().toISOString().split("T")[0];
+
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/export`, {
+        headers: { "X-Admin-Token": getAdminToken() }
+      });
     } catch (err) {
-      // Offline fallback: export from localStorage
-      const backup = {
+      download({
         exportedAt: new Date().toISOString(),
         source: "local-offline-cache",
         totalRecords: animals.length,
         animals
-      };
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `cattlecare_local_backup_${new Date().toISOString().split("T")[0]}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      showToast("Offline herd backup downloaded! 💾");
+      }, `cattlecare_local_backup_${dateStr}.json`);
+      showToast("Offline herd backup downloaded from local cache. 💾");
+      return;
     }
+
+    if (res.status === 401) {
+      clearAdminToken();
+      showToast("Wrong admin passcode. Backup not downloaded.");
+      return;
+    }
+    if (!res.ok) {
+      showToast("Server export failed. Backup not downloaded.");
+      return;
+    }
+    download(await res.json(), `cattlecare_backup_${dateStr}.json`);
+    showToast("Herd database backup downloaded! 💾");
   });
 }
 
@@ -725,6 +774,7 @@ $("footerYear").textContent = new Date().getFullYear();
 (async function init() {
   await syncAnimals();
   renderAll();
+  await hydratePhotos();
 })();
 
 })(); // end IIFE
