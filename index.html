@@ -26,6 +26,7 @@
         <button class="nav-link" data-page="cattle"><span>♧</span> My Cattle</button>
         <button class="nav-link" data-page="vaccinations"><span>✚</span> Vaccinations</button>
         <button class="nav-link" data-page="qr"><span>▦</span> QR Station</button>
+        <a class="nav-link" href="portal.html" target="_blank" style="text-decoration: none; color: #e6bb63;"><span>🌐</span> Public/Vet Portal ↗</a>
       </nav>
 
       <div class="sidebar-bottom">
@@ -35,6 +36,9 @@
           <p>Healthy animals. A healthier planet.</p>
           <div class="eco-decoration">❧</div>
         </div>
+        <button id="exportBackupBtn" class="backup-button" title="Download full JSON database backup">
+          <span>💾</span> Backup Herd Data
+        </button>
         <div class="sidebar-footer">Made with care <span>♥</span></div>
       </div>
     </aside>
@@ -44,8 +48,11 @@
         <button class="mobile-menu" id="menuToggle" aria-label="Toggle menu">☰</button>
         <div class="breadcrumb">Farm workspace <span>/</span> <strong id="pageCrumb">Overview</strong></div>
         <div class="topbar-right">
-          <span class="live-dot"></span>
-          <span class="live-label">Farm system active</span>
+          <a href="portal.html" target="_blank" class="portal-header-btn" title="Open Public & Vet Inspection Portal">
+            <span>🌐</span> Public / Vet Portal ↗
+          </a>
+          <span class="live-dot" id="liveDot"></span>
+          <span class="live-label" id="liveStatus">Connecting to backend...</span>
           <div class="avatar">🌱</div>
         </div>
       </header>

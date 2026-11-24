@@ -1,12 +1,39 @@
+/**
+ * CattleCare | Sustainable Farm Management
+ * Full-Stack Client Script
+ * Communicates with Python/SQLite Backend REST API with offline localStorage fallback
+ */
 
 const STORAGE_KEY = "cattlecare_solarpunk_v1";
+const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://localhost:8000";
 
-let animals = loadAnimals();
+let animals = [];
+let isBackendConnected = false;
 let toastTimer;
 
 const $ = (id) => document.getElementById(id);
 
-function loadAnimals() {
+// -----------------------------------------------------------------------------
+// Backend Synchronization & Local Storage Fallback
+// -----------------------------------------------------------------------------
+
+function updateConnectionUI(connected) {
+  isBackendConnected = connected;
+  const dot = $("liveDot");
+  const label = $("liveStatus");
+
+  if (!dot || !label) return;
+
+  if (connected) {
+    dot.classList.remove("offline");
+    label.textContent = "Backend active (SQLite)";
+  } else {
+    dot.classList.add("offline");
+    label.textContent = "Local mode (Offline)";
+  }
+}
+
+function loadLocalAnimals() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
     return Array.isArray(saved) ? saved : [];
@@ -15,7 +42,7 @@ function loadAnimals() {
   }
 }
 
-function saveAnimals() {
+function saveLocalAnimals() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(animals));
     return true;
@@ -24,6 +51,35 @@ function saveAnimals() {
     return false;
   }
 }
+
+async function syncAnimals() {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    const response = await fetch(`${API_BASE}/api/animals`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      animals = await response.json();
+      saveLocalAnimals(); // Keep localStorage in sync as backup cache
+      updateConnectionUI(true);
+      return;
+    }
+  } catch (error) {
+    // Backend offline or unreachable
+  }
+
+  // Fallback to local storage
+  updateConnectionUI(false);
+  animals = loadLocalAnimals();
+}
+
+// -----------------------------------------------------------------------------
+// Utilities & Formatting
+// -----------------------------------------------------------------------------
 
 function escapeHTML(value = "") {
   return String(value).replace(/[&<>"']/g, char => ({
@@ -67,6 +123,10 @@ function showToast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2800);
 }
+
+// -----------------------------------------------------------------------------
+// Modal & Image Processing
+// -----------------------------------------------------------------------------
 
 function openModal(animal = null) {
   $("animalForm").reset();
@@ -122,13 +182,24 @@ function resizePhoto(file) {
   });
 }
 
+// -----------------------------------------------------------------------------
+// Form Handling (Create / Update via REST API)
+// -----------------------------------------------------------------------------
+
 $("animalForm").addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const existingId = $("animalId").value;
   const existing = animals.find(animal => animal.id === existingId);
   const tag = $("animalTag").value.trim();
+  const name = $("animalName").value.trim();
 
+  if (!name || !tag) {
+    $("formMessage").textContent = "Animal name and ID are required.";
+    return;
+  }
+
+  // Client-side duplicate check
   const duplicate = animals.some(animal =>
     animal.tag.toLowerCase() === tag.toLowerCase() && animal.id !== existingId
   );
@@ -148,9 +219,9 @@ $("animalForm").addEventListener("submit", async (event) => {
     return;
   }
 
-  const animal = {
+  const payload = {
     id: existingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
-    name: $("animalName").value.trim(),
+    name,
     tag,
     breed: $("animalBreed").value.trim(),
     dob: $("animalDob").value,
@@ -163,27 +234,112 @@ $("animalForm").addEventListener("submit", async (event) => {
     createdAt: existing?.createdAt || new Date().toISOString()
   };
 
-  if (!animal.name || !animal.tag) {
-    $("formMessage").textContent = "Animal name and ID are required.";
-    return;
+  const submitBtn = $("animalForm").querySelector("button[type='submit']");
+  if (submitBtn) submitBtn.disabled = true;
+
+  try {
+    if (isBackendConnected) {
+      // Send to Python REST API with Admin Token
+      const url = existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`;
+      const method = existingId ? "PUT" : "POST";
+
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Token": "REDACTED-OLD-SECRET"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        $("formMessage").textContent = data.error || "Failed to save animal record.";
+        if (submitBtn) submitBtn.disabled = false;
+        return;
+      }
+
+      await syncAnimals();
+    } else {
+      // Offline fallback
+      if (existing) {
+        animals = animals.map(item => item.id === existingId ? payload : item);
+      } else {
+        animals.unshift(payload);
+      }
+      if (!saveLocalAnimals()) {
+        if (submitBtn) submitBtn.disabled = false;
+        return;
+      }
+    }
+
+    closeModal();
+    renderAll();
+    showToast(existing ? "Cattle details updated 🌿" : "New cattle registered successfully 🌱");
+  } catch (err) {
+    $("formMessage").textContent = "Error saving animal: " + err.message;
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
-
-  if (existing) {
-    animals = animals.map(item => item.id === existingId ? animal : item);
-  } else {
-    animals.unshift(animal);
-  }
-
-  if (!saveAnimals()) return;
-
-  closeModal();
-  renderAll();
-  showToast(existing ? "Cattle details updated 🌿" : "New cattle registered successfully 🌱");
 });
 
+// -----------------------------------------------------------------------------
+// Deleting an Animal
+// -----------------------------------------------------------------------------
+
+async function deleteAnimal(id) {
+  const animal = animals.find(a => a.id === id);
+  if (!animal) return;
+
+  if (!confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
+
+  if (isBackendConnected) {
+    try {
+      const res = await fetch(`${API_BASE}/api/animals/${id}`, {
+        method: "DELETE",
+        headers: { "X-Admin-Token": "REDACTED-OLD-SECRET" }
+      });
+      if (res.ok) {
+        await syncAnimals();
+        renderAll();
+        showToast("Animal record deleted from database.");
+        return;
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        showToast("Delete failed: " + (errData.error || "Server error"));
+        return;
+      }
+    } catch (e) {
+      showToast("Network error deleting animal: " + e.message);
+      return;
+    }
+  }
+
+  // Local fallback ONLY when genuinely offline
+  animals = animals.filter(a => a.id !== id);
+  if (saveLocalAnimals()) {
+    renderAll();
+    showToast("Animal record deleted.");
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Rendering Functions
+// -----------------------------------------------------------------------------
+
+function safePhotoUrl(photo) {
+  if (!photo || typeof photo !== "string") return "";
+  const trimmed = photo.trim();
+  if (trimmed.startsWith("data:image/") || trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("/")) {
+    return trimmed;
+  }
+  return "";
+}
+
 function animalPhotoMarkup(animal, mini = false) {
-  if (animal.photo) {
-    return `<img src="${animal.photo}" alt="${escapeHTML(animal.name)}">`;
+  const photo = safePhotoUrl(animal.photo);
+  if (photo) {
+    return `<img src="${photo}" alt="${escapeHTML(animal.name)}">`;
   }
   return `<div class="${mini ? "mini-placeholder" : "photo-placeholder"}">🐄</div>`;
 }
@@ -272,6 +428,7 @@ function renderCattle() {
         <div class="animal-actions">
           <button class="small-button" data-action="edit" data-id="${escapeHTML(animal.id)}">Edit details</button>
           <button class="small-button" data-action="qr" data-id="${escapeHTML(animal.id)}">View QR</button>
+          <a class="small-button" href="portal.html?tag=${encodeURIComponent(animal.tag)}" target="_blank" style="text-decoration:none; display:inline-flex; align-items:center;">Passport ↗</a>
           <button class="small-button danger" data-action="delete" data-id="${escapeHTML(animal.id)}">Delete</button>
         </div>
       </div>
@@ -313,7 +470,12 @@ function renderVaccinations() {
 }
 
 function makeQrText(animal) {
+  const host = window.location.protocol.startsWith("http") ? window.location.origin : "http://localhost:8000";
+  const passportUrl = `${host}/portal.html?tag=${encodeURIComponent(animal.tag)}`;
+
   return [
+    passportUrl,
+    "----------------------------------------",
     "CATTLECARE ANIMAL PROFILE",
     `Name: ${animal.name}`,
     `Animal ID: ${animal.tag}`,
@@ -423,18 +585,9 @@ function downloadQr(id) {
   showToast("QR code downloaded!");
 }
 
-function deleteAnimal(id) {
-  const animal = animals.find(a => a.id === id);
-  if (!animal) return;
-
-  if (!confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
-
-  animals = animals.filter(a => a.id !== id);
-  if (saveAnimals()) {
-    renderAll();
-    showToast("Animal record deleted.");
-  }
-}
+// -----------------------------------------------------------------------------
+// Event Listeners
+// -----------------------------------------------------------------------------
 
 // Navigation
 document.querySelectorAll(".nav-link").forEach(button => {
@@ -489,7 +642,48 @@ $("menuToggle").addEventListener("click", () => {
   $("sidebar").classList.toggle("open");
 });
 
-// Initial setup
+// Export full database backup
+const backupBtn = $("exportBackupBtn");
+if (backupBtn) {
+  backupBtn.addEventListener("click", async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/export`);
+      if (!res.ok) throw new Error("Server export returned error");
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const dateStr = new Date().toISOString().split("T")[0];
+      a.href = url;
+      a.download = `cattlecare_backup_${dateStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast("Herd database backup downloaded! 💾");
+    } catch (err) {
+      // Offline fallback: export from localStorage
+      const backup = {
+        exportedAt: new Date().toISOString(),
+        source: "local-offline-cache",
+        totalRecords: animals.length,
+        animals
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `cattlecare_local_backup_${new Date().toISOString().split("T")[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast("Offline herd backup downloaded! 💾");
+    }
+  });
+}
+
+// Initial date setup
 $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
   weekday: "short",
   day: "numeric",
@@ -498,4 +692,8 @@ $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
 });
 $("footerYear").textContent = new Date().getFullYear();
 
-renderAll();
+// Initialize app: sync with backend, then render
+(async function init() {
+  await syncAnimals();
+  renderAll();
+})();

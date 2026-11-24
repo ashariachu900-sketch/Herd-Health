@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#193e32">
+  <title>CattleCare | Public & Vet Health Verification Portal</title>
+  <link rel="stylesheet" href="portal.css">
+</head>
+<body>
+
+  <!-- Topbar -->
+  <header class="portal-header">
+    <a class="portal-brand" href="portal.html">
+      <span class="portal-brand-mark">✿</span>
+      <div>
+        <strong>CattleCare Portal</strong>
+        <small>VERIFIED LIVESTOCK HEALTH & PASSPORT</small>
+      </div>
+    </a>
+
+    <div class="portal-header-right">
+      <div class="status-badge">
+        <span class="status-dot" id="portalStatusDot"></span>
+        <span id="portalStatusLabel">Connecting to database...</span>
+      </div>
+      <a href="index.html" class="nav-btn" title="Switch to farm administration">
+        <span>⚙</span> Farmer Workspace ↗
+      </a>
+    </div>
+  </header>
+
+  <main class="portal-container">
+
+    <!-- Directory & Search View -->
+    <div id="directorySection">
+      <section class="portal-hero">
+        <span class="hero-tag">✦ PUBLIC & VETERINARIAN ACCESS</span>
+        <h1>Verified Herd Health Records</h1>
+        <p>Inspect animal pedigrees, clinical checkup histories, and live vaccination schedules recorded directly by the farm manager.</p>
+        
+        <div class="search-bar-wrap">
+          <input type="search" id="searchInput" class="portal-search-input" placeholder="Search by Animal Tag ID (e.g. COW-101), Name, or Breed...">
+          <button id="searchButton" class="search-action-btn">Search Herd</button>
+        </div>
+      </section>
+
+      <!-- Herd Snapshot Metrics -->
+      <section class="metrics-strip">
+        <div class="metric-box">
+          <span>Registered Herd</span>
+          <strong id="metricTotal">0</strong>
+        </div>
+        <div class="metric-box">
+          <span>Health Index</span>
+          <strong id="metricHealthyRate">0%</strong>
+        </div>
+        <div class="metric-box">
+          <span>Needs Attention</span>
+          <strong id="metricAttention">0</strong>
+        </div>
+        <div class="metric-box">
+          <span>Vaccinations Due</span>
+          <strong id="metricDue">0</strong>
+        </div>
+      </section>
+
+      <!-- Filters & Results Bar -->
+      <div class="filter-bar">
+        <div class="filter-pills" id="filterPills">
+          <button class="filter-pill active" data-filter="all">All Animals</button>
+          <button class="filter-pill" data-filter="healthy">Healthy Only</button>
+          <button class="filter-pill" data-filter="attention">Needs Attention</button>
+          <button class="filter-pill" data-filter="vaccine_due">Vaccines Due / Overdue</button>
+        </div>
+        <span class="results-summary" id="resultsCount">Loading herd directory...</span>
+      </div>
+
+      <!-- Cattle Cards Grid -->
+      <div class="cattle-cards-grid" id="cattleGrid">
+        <!-- Rendered dynamically by portal.js -->
+      </div>
+    </div>
+
+    <!-- Animal Individual Passport View -->
+    <div id="passportSection" class="passport-view">
+      <div class="passport-top-nav">
+        <button id="backToDirectory" class="back-link">
+          <span>←</span> Back to Herd Directory
+        </button>
+        <div class="passport-actions">
+          <button id="copyLinkBtn" class="action-btn">
+            <span>🔗</span> Copy Link
+          </button>
+          <button id="printBtn" class="action-btn print-btn">
+            <span>🖨</span> Print Health Certificate
+          </button>
+        </div>
+      </div>
+
+      <!-- Certificate Document Card -->
+      <article class="passport-certificate">
+        <div class="certificate-header">
+          <div class="certificate-title">
+            <h2>Official Cattle Health Passport</h2>
+            <span>CattleCare Verified Farm Records System</span>
+          </div>
+          <div class="certificate-stamp">✓ Verified Record</div>
+        </div>
+
+        <div class="passport-hero-section">
+          <div class="passport-photo-frame" id="passportPhoto">
+            <!-- Photo or Placeholder -->
+          </div>
+          <div class="passport-hero-info">
+            <span class="passport-tag-pill" id="passportTag">COW-000</span>
+            <h1 class="passport-name" id="passportName">Animal Name</h1>
+            <div class="passport-breed-tag" id="passportBreed">Breed Information</div>
+            
+            <div class="passport-quick-badges" id="passportBadges">
+              <!-- Health badge and vaccination badge -->
+            </div>
+          </div>
+        </div>
+
+        <div class="passport-details-grid">
+          <!-- Card 1: Animal Specifications -->
+          <div class="detail-card">
+            <h3><span>📋</span> Animal Identification</h3>
+            <div class="info-rows">
+              <div class="info-row">
+                <span class="label">Official Tag ID</span>
+                <span class="val" id="specTag">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Breed</span>
+                <span class="val" id="specBreed">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Date of Birth</span>
+                <span class="val" id="specDob">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Calculated Age</span>
+                <span class="val" id="specAge">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Health Status</span>
+                <span class="val" id="specHealth">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Registration Date</span>
+                <span class="val" id="specRegistered">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 2: Preventive Healthcare -->
+          <div class="detail-card">
+            <h3><span>✚</span> Vaccination & Immunization</h3>
+            <div class="info-rows">
+              <div class="info-row">
+                <span class="label">Vaccine Name</span>
+                <span class="val" id="specVaccineName">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Last Administered</span>
+                <span class="val" id="specLastVaccine">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Next Scheduled Due</span>
+                <span class="val" id="specNextVaccine">—</span>
+              </div>
+              <div class="info-row">
+                <span class="label">Immunization Status</span>
+                <span class="val" id="specVaccineStatus">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 3: Doctor & Clinical Notes -->
+          <div class="doctor-notes-box">
+            <h3><span>🩺</span> Veterinarian & Farm Medical Notes</h3>
+            <div class="notes-content" id="specDoctorNotes">
+              No medical notes recorded for this animal.
+            </div>
+          </div>
+        </div>
+
+        <div class="certificate-footer">
+          <span>Certificate generated from CattleCare Farm System</span>
+          <span id="certificateTimestamp">Verified at: —</span>
+        </div>
+      </article>
+    </div>
+
+  </main>
+
+  <div class="portal-toast" id="portalToast"></div>
+
+  <script src="portal.js"></script>
+</body>
+</html>
