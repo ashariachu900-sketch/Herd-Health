@@ -254,5 +254,34 @@ class CattleCareBackendTests(unittest.TestCase):
         status, resp = self.client.request("POST", "/api/animals", data=dummy_data, headers=bad_headers)
         self.assertEqual(status, 401, "Invalid token must return HTTP 401 Unauthorized.")
 
+    def test_11_summary_param_excludes_photos(self):
+        """GET /api/animals?summary=true must omit 'photo' field from every record."""
+        # Create an animal with a photo so there is photo data to potentially leak
+        payload = {
+            "name": "SummaryTest",
+            "tag": "SUM-001",
+            "photo": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        }
+        status, _ = self.client.request("POST", "/api/animals", data=payload)
+        self.assertEqual(status, 201, "Setup: animal creation must succeed for summary test.")
+
+        # Fetch with summary=true — photo must be absent
+        status, body = self.client.request("GET", "/api/animals?summary=true")
+        self.assertEqual(status, 200, "Summary list must return HTTP 200.")
+        animals = body  # client already parses JSON → body is a list
+        for animal in animals:
+            self.assertNotIn("photo", animal,
+                f"summary=true must strip 'photo' from animal '{animal.get('tag', '?')}'")
+
+        # Fetch without summary — photo must be present for the record we created
+        status2, full_list = self.client.request("GET", "/api/animals")
+        self.assertEqual(status2, 200)
+        sum_animal = next((a for a in full_list if a.get("tag") == "SUM-001"), None)
+        self.assertIsNotNone(sum_animal, "SUM-001 must appear in full list")
+        self.assertIn("photo", sum_animal, "Full list (no summary flag) must include 'photo'.")
+
+        # Cleanup
+        self.client.request("DELETE", f"/api/animals/{sum_animal['id']}")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

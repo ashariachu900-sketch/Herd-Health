@@ -4,8 +4,39 @@
  * Communicates with Python/SQLite Backend REST API with offline localStorage fallback
  */
 
+(() => { // IIFE — prevents globals from leaking into the page scope
+
 const STORAGE_KEY = "cattlecare_solarpunk_v1";
 const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+
+/** Milliseconds in one day — avoids repeating the magic number 86400000. */
+const MS_PER_DAY = 86_400_000;
+
+/** Only allow small data-URI images to be injected into an <img src>. */
+const SAFE_PHOTO = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+
+// -----------------------------------------------------------------------------
+// Admin Token — stored in sessionStorage; prompts once per browser session
+// -----------------------------------------------------------------------------
+
+/**
+ * Returns the farm admin passcode.
+ * On first call in the session, shows a prompt dialog and caches the result.
+ * Clears the cached token and re-prompts if the value is empty / cancelled.
+ *
+ * @returns {string} The admin token (may be empty string if user cancels).
+ */
+function getAdminToken() {
+  let token = sessionStorage.getItem("farm_admin_token");
+  if (!token) {
+    token = prompt("Enter Farm Administrator Passcode:");
+    if (token) {
+      sessionStorage.setItem("farm_admin_token", token.trim());
+      token = token.trim();
+    }
+  }
+  return token || "";
+}
 
 let animals = [];
 let isBackendConnected = false;
@@ -105,7 +136,7 @@ function dayDifference(value) {
   if (!date) return null;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  return Math.round((date - today) / 86400000);
+  return Math.round((date - today) / MS_PER_DAY);
 }
 
 function vaccineStatus(value) {
@@ -128,7 +159,10 @@ function showToast(message) {
 // Modal & Image Processing
 // -----------------------------------------------------------------------------
 
+let lastFocusedElement = null;
+
 function openModal(animal = null) {
+  lastFocusedElement = document.activeElement;
   $("animalForm").reset();
   $("animalId").value = animal?.id || "";
   $("modalTitle").textContent = animal ? "Update cattle details" : "Register cattle";
@@ -152,6 +186,10 @@ function closeModal() {
   $("animalModal").classList.remove("open");
   $("animalModal").setAttribute("aria-hidden", "true");
   document.body.style.overflow = "";
+  if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
+    lastFocusedElement.focus();
+  }
+  lastFocusedElement = null;
 }
 
 function resizePhoto(file) {
@@ -234,44 +272,37 @@ $("animalForm").addEventListener("submit", async (event) => {
     createdAt: existing?.createdAt || new Date().toISOString()
   };
 
+  // Offline writes are disabled on purpose: a local-only edit would be silently
+  // overwritten by syncAnimals() when the server comes back.
+  if (!isBackendConnected) {
+    $("formMessage").textContent = "Offline: saving is disabled so records cannot be lost.";
+    return;
+  }
+
   const submitBtn = $("animalForm").querySelector("button[type='submit']");
   if (submitBtn) submitBtn.disabled = true;
 
   try {
-    if (isBackendConnected) {
-      // Send to Python REST API with Admin Token
-      const url = existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`;
-      const method = existingId ? "PUT" : "POST";
+    // Send to Python REST API with Admin Token
+    const url = existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`;
+    const method = existingId ? "PUT" : "POST";
 
-      const res = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-Token": "REDACTED-OLD-SECRET"
-        },
-        body: JSON.stringify(payload)
-      });
+    const res = await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Token": getAdminToken()
+      },
+      body: JSON.stringify(payload)
+    });
 
-      const data = await res.json();
-      if (!res.ok) {
-        $("formMessage").textContent = data.error || "Failed to save animal record.";
-        if (submitBtn) submitBtn.disabled = false;
-        return;
-      }
-
-      await syncAnimals();
-    } else {
-      // Offline fallback
-      if (existing) {
-        animals = animals.map(item => item.id === existingId ? payload : item);
-      } else {
-        animals.unshift(payload);
-      }
-      if (!saveLocalAnimals()) {
-        if (submitBtn) submitBtn.disabled = false;
-        return;
-      }
+    const data = await res.json();
+    if (!res.ok) {
+      $("formMessage").textContent = data.error || "Failed to save animal record.";
+      return;
     }
+
+    await syncAnimals();
 
     closeModal();
     renderAll();
@@ -293,33 +324,26 @@ async function deleteAnimal(id) {
 
   if (!confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
 
-  if (isBackendConnected) {
-    try {
-      const res = await fetch(`${API_BASE}/api/animals/${id}`, {
-        method: "DELETE",
-        headers: { "X-Admin-Token": "REDACTED-OLD-SECRET" }
-      });
-      if (res.ok) {
-        await syncAnimals();
-        renderAll();
-        showToast("Animal record deleted from database.");
-        return;
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        showToast("Delete failed: " + (errData.error || "Server error"));
-        return;
-      }
-    } catch (e) {
-      showToast("Network error deleting animal: " + e.message);
-      return;
-    }
+  if (!isBackendConnected) {
+    showToast("Offline: deleting is disabled so records cannot be lost.");
+    return;
   }
 
-  // Local fallback ONLY when genuinely offline
-  animals = animals.filter(a => a.id !== id);
-  if (saveLocalAnimals()) {
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${id}`, {
+      method: "DELETE",
+      headers: { "X-Admin-Token": getAdminToken() }
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      showToast("Delete failed: " + (errData.error || "Server error"));
+      return;
+    }
+    await syncAnimals();
     renderAll();
-    showToast("Animal record deleted.");
+    showToast("Animal record deleted from database.");
+  } catch (e) {
+    showToast("Network error deleting animal: " + e.message);
   }
 }
 
@@ -330,16 +354,13 @@ async function deleteAnimal(id) {
 function safePhotoUrl(photo) {
   if (!photo || typeof photo !== "string") return "";
   const trimmed = photo.trim();
-  if (trimmed.startsWith("data:image/") || trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("/")) {
-    return trimmed;
-  }
-  return "";
+  return SAFE_PHOTO.test(trimmed) ? trimmed : "";
 }
 
 function animalPhotoMarkup(animal, mini = false) {
   const photo = safePhotoUrl(animal.photo);
   if (photo) {
-    return `<img src="${photo}" alt="${escapeHTML(animal.name)}">`;
+    return `<img src="${escapeHTML(photo)}" alt="${escapeHTML(animal.name)}">`;
   }
   return `<div class="${mini ? "mini-placeholder" : "photo-placeholder"}">🐄</div>`;
 }
@@ -471,22 +492,8 @@ function renderVaccinations() {
 
 function makeQrText(animal) {
   const host = window.location.protocol.startsWith("http") ? window.location.origin : "http://localhost:8000";
-  const passportUrl = `${host}/portal.html?tag=${encodeURIComponent(animal.tag)}`;
-
-  return [
-    passportUrl,
-    "----------------------------------------",
-    "CATTLECARE ANIMAL PROFILE",
-    `Name: ${animal.name}`,
-    `Animal ID: ${animal.tag}`,
-    `Breed: ${animal.breed || "Not recorded"}`,
-    `Health: ${animal.health}`,
-    `Date of birth: ${animal.dob || "Not recorded"}`,
-    `Last vaccination: ${animal.lastVaccineDate || "Not recorded"}`,
-    `Vaccine: ${animal.vaccineName || "Not recorded"}`,
-    `Next vaccination: ${animal.nextVaccineDate || "Not scheduled"}`,
-    `Doctor notes: ${animal.notes || "None"}`
-  ].join("\n");
+  // Keep the QR small and scannable; clinical details belong in the passport, not on a tag.
+  return `${host}/portal.html?tag=${encodeURIComponent(animal.tag)}`;
 }
 
 function renderQrCodes() {
@@ -590,7 +597,7 @@ function downloadQr(id) {
 // -----------------------------------------------------------------------------
 
 // Navigation
-document.querySelectorAll(".nav-link").forEach(button => {
+document.querySelectorAll(".nav-link[data-page]").forEach(button => {
   button.addEventListener("click", () => showPage(button.dataset.page));
 });
 
@@ -608,7 +615,29 @@ $("animalModal").addEventListener("click", event => {
 });
 
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape") closeModal();
+  const modal = $("animalModal");
+  if (!modal.classList.contains("open")) return;
+
+  if (event.key === "Escape") {
+    closeModal();
+    return;
+  }
+
+  // Keep Tab focus inside the dialog while it is open.
+  if (event.key === "Tab") {
+    const focusable = [...modal.querySelectorAll("button, input, select, textarea, a[href]")]
+      .filter(el => !el.disabled && el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 });
 
 // Cattle search and filtering
@@ -697,3 +726,5 @@ $("footerYear").textContent = new Date().getFullYear();
   await syncAnimals();
   renderAll();
 })();
+
+})(); // end IIFE

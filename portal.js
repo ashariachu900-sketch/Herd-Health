@@ -3,8 +3,16 @@
  * Handles herd inspection, live search, filtering, and single animal passport generation
  */
 
+(() => { // IIFE — prevents globals from leaking into the page scope
+
 const STORAGE_KEY = "cattlecare_solarpunk_v1";
 const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+
+/** Milliseconds in one day — avoids repeating the magic number 86400000. */
+const MS_PER_DAY = 86_400_000;
+
+/** Only allow small data-URI images to be injected into an <img src>. */
+const SAFE_PHOTO = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 let animals = [];
 let isBackendConnected = false;
@@ -32,16 +40,27 @@ async function init() {
       showPassport(found);
       return;
     }
+    showMissingRecord(animalTag);
+    return;
   } else if (animalId) {
     const found = animals.find(a => a.id === animalId);
     if (found) {
       showPassport(found);
       return;
     }
+    showMissingRecord(animalId);
+    return;
   }
 
   // Otherwise, render full herd directory
   renderDirectory();
+}
+
+function showMissingRecord(key) {
+  renderDirectory();
+  const notice = $("missingRecord");
+  notice.textContent = `No animal record found for "${key}". The record may have been deleted or the link may be incorrect.`;
+  notice.hidden = false;
 }
 
 async function syncAnimals() {
@@ -98,10 +117,7 @@ function formatDate(val) {
 function safePhotoUrl(photo) {
   if (!photo || typeof photo !== "string") return "";
   const trimmed = photo.trim();
-  if (trimmed.startsWith("data:image/") || trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("/")) {
-    return trimmed;
-  }
-  return "";
+  return SAFE_PHOTO.test(trimmed) ? trimmed : "";
 }
 
 function calculateAge(dobStr) {
@@ -133,7 +149,7 @@ function dayDifference(dateStr) {
   if (Number.isNaN(target.getTime())) return null;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  return Math.round((target - today) / 86400000);
+  return Math.round((target - today) / MS_PER_DAY);
 }
 
 function vaccineStatus(dateStr) {
@@ -159,6 +175,8 @@ function showToast(message) {
 function renderDirectory() {
   $("passportSection").classList.remove("active");
   $("directorySection").style.display = "block";
+  document.body.classList.remove("passport-open");
+  $("missingRecord").hidden = true;
 
   // Calculate Metrics
   const total = animals.length;
@@ -217,7 +235,7 @@ function renderDirectory() {
     return `
       <article class="cattle-card">
         <div class="card-img-wrap">
-          ${photoUrl ? `<img src="${photoUrl}" alt="${escapeHTML(animal.name)}">` : `<div class="card-img-placeholder">🐄</div>`}
+          ${photoUrl ? `<img src="${escapeHTML(photoUrl)}" alt="${escapeHTML(animal.name)}">` : `<div class="card-img-placeholder">🐄</div>`}
           <span class="card-health-pill ${isHealthy ? 'healthy' : 'attention'}">${escapeHTML(animal.health)}</span>
         </div>
         <div class="card-body">
@@ -254,6 +272,8 @@ function renderDirectory() {
 
 function showPassport(animal) {
   $("directorySection").style.display = "none";
+  $("missingRecord").hidden = true;
+  document.body.classList.add("passport-open");
   const passport = $("passportSection");
   passport.classList.add("active");
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -265,7 +285,7 @@ function showPassport(animal) {
   // Photo
   const passportPhoto = safePhotoUrl(animal.photo);
   $("passportPhoto").innerHTML = passportPhoto ?
-    `<img src="${passportPhoto}" alt="${escapeHTML(animal.name)}">` :
+    `<img src="${escapeHTML(passportPhoto)}" alt="${escapeHTML(animal.name)}">` :
     `<div style="display:grid; place-items:center; height:100%; font-size:75px;">🐄</div>`;
 
   // Hero Info
@@ -304,8 +324,14 @@ function showPassport(animal) {
   // Doctor Notes
   $("specDoctorNotes").textContent = animal.notes || "No clinical observations or doctor notes have been entered for this animal.";
 
-  // Timestamp
-  $("certificateTimestamp").textContent = `Verified at: ${new Date().toLocaleString()}`;
+  // Verification status: never claim a record is verified unless a vet set the flag.
+  const verified = Number(animal.verified) === 1;
+  const stamp = document.querySelector(".certificate-stamp");
+  stamp.textContent = verified ? "✓ Vet Verified Record" : "⚠ Farmer entry — not vet-verified";
+  stamp.classList.toggle("unverified", !verified);
+  $("certificateTimestamp").textContent = verified
+    ? `Verified at: ${formatDate(animal.verifiedAt)} by ${animal.verifiedBy || " veterinarian"}`
+    : "No veterinary verification on file";
 }
 
 window.openPassportById = function(id) {
@@ -335,8 +361,12 @@ function setupEventListeners() {
     const btn = e.target.closest(".filter-pill");
     if (!btn) return;
 
-    document.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
+    document.querySelectorAll(".filter-pill").forEach(p => {
+      p.classList.remove("active");
+      p.setAttribute("aria-pressed", "false");
+    });
     btn.classList.add("active");
+    btn.setAttribute("aria-pressed", "true");
     currentFilter = btn.dataset.filter;
     renderDirectory();
   });
@@ -380,3 +410,5 @@ function setupEventListeners() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+})(); // end IIFE

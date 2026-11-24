@@ -15,9 +15,11 @@ Endpoints:
   Static files              - Serves index.html, portal.html, style.css, script.js, etc.
 """
 
-import sys
 import os
+import re
+import hmac
 import json
+import uuid
 import sqlite3
 import datetime
 import urllib.parse
@@ -27,20 +29,37 @@ PORT = int(os.environ.get("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cattlecare.db")
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY_SIZE = 5 * 1024 * 1024  # 5 MB payload limit (anti-DoS)
-ADMIN_TOKEN = os.environ.get("FARM_ADMIN_TOKEN", "REDACTED-OLD-SECRET")
+
+# No hardcoded fallback: the token must come from the environment (see run_server.bat / .env.example).
+ADMIN_TOKEN = os.environ.get("FARM_ADMIN_TOKEN")
+PHOTO_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$")
+HEALTH_VALUES = ("Healthy", "Needs attention")
+FIELD_LIMITS = {"name": 50, "tag": 30, "breed": 50, "vaccineName": 70, "notes": 1000}
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode = WAL;")
-    except Exception:
-        pass
     return conn
+
+def ensure_columns(conn):
+    """Add verification columns to databases created by older versions."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(animals)")}
+    additions = {
+        "verified": "INTEGER NOT NULL DEFAULT 0",
+        "verifiedBy": "TEXT",
+        "verifiedAt": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE animals ADD COLUMN {name} {definition}")
 
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")  # persistent setting: do this once, not per request
+    except sqlite3.Error:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS animals (
             id TEXT PRIMARY KEY,
@@ -54,19 +73,24 @@ def init_db():
             nextVaccineDate TEXT,
             notes TEXT,
             photo TEXT,
-            createdAt TEXT
+            createdAt TEXT,
+            verified INTEGER NOT NULL DEFAULT 0,
+            verifiedBy TEXT,
+            verifiedAt TEXT
         )
     """)
+    ensure_columns(conn)
 
     # Performance indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_created ON animals (createdAt DESC);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_health ON animals (health);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_tag ON animals (tag);")
     conn.commit()
 
-    # Insert sample seed data if table is completely empty
+    # Demo data is opt-in only. Real databases must start empty.
     cursor.execute("SELECT COUNT(*) as count FROM animals")
     count = cursor.fetchone()["count"]
-    if count == 0:
+    if count == 0 and os.environ.get("SEED_DEMO_DATA") == "1":
         seed_data = [
             (
                 "seed-001",
@@ -134,8 +158,48 @@ def row_to_dict(row):
         "nextVaccineDate": row["nextVaccineDate"] or "",
         "notes": row["notes"] or "",
         "photo": row["photo"] or "",
-        "createdAt": row["createdAt"] or ""
+        "createdAt": row["createdAt"] or "",
+        "verified": bool(row["verified"]) if "verified" in row.keys() else False,
+        "verifiedBy": (row["verifiedBy"] or "") if "verifiedBy" in row.keys() else "",
+        "verifiedAt": (row["verifiedAt"] or "") if "verifiedAt" in row.keys() else ""
     }
+
+def valid_iso_date(value):
+    if not value:
+        return True
+    try:
+        datetime.date.fromisoformat(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+def clean_animal_fields(data):
+    """Validate and normalize client input. Returns (fields, error_message)."""
+    fields = {}
+    for key, limit in FIELD_LIMITS.items():
+        value = data.get(key) or ""
+        value = str(value).strip()
+        if len(value) > limit:
+            return None, f"{key} must be {limit} characters or fewer."
+        fields[key] = value
+
+    if not fields["name"] or not fields["tag"]:
+        return None, "Animal name and ID/tag are required."
+
+    fields["health"] = str(data.get("health") or "Healthy")
+    if fields["health"] not in HEALTH_VALUES:
+        return None, "Health must be 'Healthy' or 'Needs attention'."
+
+    for key in ("dob", "lastVaccineDate", "nextVaccineDate"):
+        value = str(data.get(key) or "")
+        if not valid_iso_date(value):
+            return None, f"{key} must be a valid YYYY-MM-DD date or empty."
+        fields[key] = value
+
+    fields["photo"] = str(data.get("photo") or "")
+    if fields["photo"] and not PHOTO_RE.fullmatch(fields["photo"]):
+        return None, "Photo must be a small base64-encoded PNG/JPEG/GIF/WebP image."
+    return fields, None
 
 def day_difference(date_str):
     if not date_str:
@@ -161,22 +225,15 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
 
-    def send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token")
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_cors_headers()
-        self.end_headers()
+    # This app is served from the same origin as its API, so no CORS headers are
+    # needed. Wildcard CORS on write endpoints would let other sites call this API.
 
     def send_json(self, status_code, data):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_cors_headers()
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -186,19 +243,28 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if content_length > MAX_BODY_SIZE:
                 self.send_json(413, {"error": "Payload exceeds 5MB limit."})
                 return None
+            if content_length < 0:
+                raise ValueError("Negative Content-Length")
             if content_length > 0:
                 raw_body = self.rfile.read(content_length).decode("utf-8")
-                return json.loads(raw_body)
+                parsed = json.loads(raw_body)
+                if not isinstance(parsed, dict):
+                    raise ValueError("JSON body must be an object")
+                return parsed
             return {}
         except Exception:
             self.send_json(400, {"error": "Invalid JSON body format."})
             return "ERROR"
 
     def check_auth(self):
-        token = self.headers.get("X-Admin-Token") or self.headers.get("Authorization", "").replace("Bearer ", "")
-        if token and (token == ADMIN_TOKEN or token == "REDACTED-OLD-SECRET"):
+        token = self.headers.get("X-Admin-Token")
+        if not token:
+            authorization = self.headers.get("Authorization", "")
+            token = authorization.removeprefix("Bearer ").strip()
+        # Constant-time compare avoids leaking the token through timing differences.
+        if ADMIN_TOKEN and token and hmac.compare_digest(token, ADMIN_TOKEN):
             return True
-        self.send_json(401, {"error": "Unauthorized: Valid X-Admin-Token required for modification."})
+        self.send_json(401, {"error": "Unauthorized: Valid X-Admin-Token required."})
         return False
 
     def do_GET(self):
@@ -216,6 +282,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/export":
+            if not self.check_auth():
+                return
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM animals ORDER BY createdAt DESC")
@@ -268,27 +336,40 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             search = query.get("search", [""])[0].strip().lower()
             tag_filter = query.get("tag", [""])[0].strip().lower()
             health_filter = query.get("health", ["all"])[0].strip()
+            # ?summary=true — omit large base64 photo blobs from list responses.
+            # Callers that need the full photo should fetch /api/animals/<id>.
+            summary_mode = query.get("summary", ["false"])[0].strip().lower() == "true"
+
+            # Filter in SQL so indexes are used and rows aren't all loaded into memory.
+            clauses, params = [], []
+            if tag_filter:
+                clauses.append("LOWER(tag) = LOWER(?)")
+                params.append(tag_filter)
+            if search:
+                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like = f"%{escaped}%"
+                clauses.append("(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(tag) LIKE ? ESCAPE '\\' OR LOWER(breed) LIKE ? ESCAPE '\\')")
+                params.extend([like, like, like])
+            if health_filter != "all":
+                clauses.append("health = ?")
+                params.append(health_filter)
+            sql = "SELECT * FROM animals"
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
+            sql += " ORDER BY createdAt DESC"
 
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM animals ORDER BY createdAt DESC")
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
             conn.close()
 
             results = []
             for r in rows:
                 animal = row_to_dict(r)
-                if tag_filter and animal["tag"].lower() != tag_filter:
-                    continue
-                if search:
-                    match = any(
-                        search in (animal[k] or "").lower()
-                        for k in ("name", "tag", "breed")
-                    )
-                    if not match:
-                        continue
-                if health_filter != "all" and animal["health"] != health_filter:
-                    continue
+                if summary_mode:
+                    animal["hasPhoto"] = bool(animal["photo"])
+                    animal.pop("photo", None)  # strip photo to cut payload size
                 results.append(animal)
 
             self.send_json(200, results)
@@ -338,6 +419,32 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
+        # Vet verification: marks a record as checked by a named professional.
+        if path.startswith("/api/animals/") and path.endswith("/verify"):
+            if not self.check_auth():
+                return
+            animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/verify")].strip())
+            data = self.parse_json_body()
+            if data is None or data == "ERROR":
+                return
+            verified_by = str(data.get("verifiedBy") or "Veterinarian").strip()[:50]
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE animals SET verified = 1, verifiedBy = ?, verifiedAt = ?
+                WHERE id = ? OR LOWER(tag) = LOWER(?)
+            """, (verified_by, datetime.datetime.now().isoformat(), animal_id, animal_id))
+            if cursor.rowcount == 0:
+                conn.close()
+                self.send_json(404, {"error": "Animal not found"})
+                return
+            conn.commit()
+            cursor.execute("SELECT * FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
+            updated = row_to_dict(cursor.fetchone())
+            conn.close()
+            self.send_json(200, updated)
+            return
+
         if path == "/api/animals":
             if not self.check_auth():
                 return
@@ -346,48 +453,43 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if data is None or data == "ERROR":
                 return
 
-            name = (data.get("name") or "").strip()
-            tag = (data.get("tag") or "").strip()
-
-            if not name or not tag:
-                self.send_json(400, {"error": "Animal name and ID/tag are required."})
+            fields, error = clean_animal_fields(data)
+            if error:
+                self.send_json(400, {"error": error})
                 return
 
-            animal_id = data.get("id") or f"cow-{int(datetime.datetime.now().timestamp()*1000)}"
-            created_at = data.get("createdAt") or datetime.datetime.now().isoformat()
+            # IDs and timestamps are generated here, never trusted from the client.
+            animal_id = str(uuid.uuid4())
+            created_at = datetime.datetime.now().isoformat()
 
             conn = get_db()
             cursor = conn.cursor()
 
             # Check duplicate tag
-            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?)", (tag,))
-            existing = cursor.fetchone()
-            if existing:
+            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?)", (fields["tag"],))
+            if cursor.fetchone():
                 conn.close()
-                self.send_json(409, {"error": f"Animal ID '{tag}' is already registered."})
+                self.send_json(409, {"error": f"Animal ID '{fields['tag']}' is already registered."})
                 return
 
-            cursor.execute("""
-                INSERT INTO animals (
-                    id, name, tag, breed, dob, health,
-                    lastVaccineDate, vaccineName, nextVaccineDate,
-                    notes, photo, createdAt
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                animal_id,
-                name,
-                tag,
-                (data.get("breed") or "").strip(),
-                data.get("dob") or "",
-                data.get("health") or "Healthy",
-                data.get("lastVaccineDate") or "",
-                (data.get("vaccineName") or "").strip(),
-                data.get("nextVaccineDate") or "",
-                (data.get("notes") or "").strip(),
-                data.get("photo") or "",
-                created_at
-            ))
-            conn.commit()
+            try:
+                cursor.execute("""
+                    INSERT INTO animals (
+                        id, name, tag, breed, dob, health,
+                        lastVaccineDate, vaccineName, nextVaccineDate,
+                        notes, photo, createdAt
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    animal_id,
+                    fields["name"], fields["tag"], fields["breed"], fields["dob"],
+                    fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
+                    fields["nextVaccineDate"], fields["notes"], fields["photo"], created_at
+                ))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.close()
+                self.send_json(409, {"error": "Record conflicts with an existing ID or tag."})
+                return
             cursor.execute("SELECT * FROM animals WHERE id = ?", (animal_id,))
             created_animal = row_to_dict(cursor.fetchone())
             conn.close()
@@ -410,11 +512,9 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if data is None or data == "ERROR":
                 return
 
-            name = (data.get("name") or "").strip()
-            tag = (data.get("tag") or "").strip()
-
-            if not name or not tag:
-                self.send_json(400, {"error": "Animal name and ID/tag are required."})
+            fields, error = clean_animal_fields(data)
+            if error:
+                self.send_json(400, {"error": error})
                 return
 
             conn = get_db()
@@ -431,16 +531,15 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             real_id = current["id"]
 
             # Check duplicate tag against other animals
-            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?) AND id != ?", (tag, real_id))
+            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?) AND id != ?", (fields["tag"], real_id))
             duplicate = cursor.fetchone()
             if duplicate:
                 conn.close()
-                self.send_json(409, {"error": f"Animal ID '{tag}' is already registered to another animal."})
+                self.send_json(409, {"error": f"Animal ID '{fields['tag']}' is already registered to another animal."})
                 return
 
-            # Keep existing photo if new photo is empty or omitted
-            new_photo = data.get("photo")
-            photo_to_save = new_photo if (new_photo and new_photo.strip()) else current["photo"]
+            # Keep existing photo if new photo is empty or omitted; verification is never overwritten here.
+            photo_to_save = fields["photo"] or current["photo"]
 
             cursor.execute("""
                 UPDATE animals SET
@@ -456,17 +555,9 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     photo = ?
                 WHERE id = ?
             """, (
-                name,
-                tag,
-                (data.get("breed") or "").strip(),
-                data.get("dob") or "",
-                data.get("health") or "Healthy",
-                data.get("lastVaccineDate") or "",
-                (data.get("vaccineName") or "").strip(),
-                data.get("nextVaccineDate") or "",
-                (data.get("notes") or "").strip(),
-                photo_to_save,
-                real_id
+                fields["name"], fields["tag"], fields["breed"], fields["dob"],
+                fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
+                fields["nextVaccineDate"], fields["notes"], photo_to_save, real_id
             ))
             conn.commit()
 
@@ -512,8 +603,14 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(404, {"error": "Endpoint not found"})
 
 def run_server(port=PORT):
+    if not ADMIN_TOKEN:
+        raise SystemExit(
+            "FARM_ADMIN_TOKEN is not set. Set it before starting the server "
+            "(see .env.example and README.md)."
+        )
     init_db()
-    server_address = ("", port)
+    # Local development listens only on loopback; use a TLS reverse proxy for real deployment.
+    server_address = ("127.0.0.1", port)
     httpd = ThreadingHTTPServer(server_address, CattleRequestHandler)
     print("=" * 60)
     print(f"  CattleCare Multi-Threaded Backend Server is running!")

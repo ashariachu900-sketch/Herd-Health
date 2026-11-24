@@ -36,10 +36,11 @@
     <div id="directorySection">
       <section class="portal-hero">
         <span class="hero-tag">✦ PUBLIC & VETERINARIAN ACCESS</span>
-        <h1>Verified Herd Health Records</h1>
+        <h1>Herd Health Records</h1>
         <p>Inspect animal pedigrees, clinical checkup histories, and live vaccination schedules recorded directly by the farm manager.</p>
         
         <div class="search-bar-wrap">
+          <label class="visually-hidden" for="searchInput">Search herd by tag, name or breed</label>
           <input type="search" id="searchInput" class="portal-search-input" placeholder="Search by Animal Tag ID (e.g. COW-101), Name, or Breed...">
           <button id="searchButton" class="search-action-btn">Search Herd</button>
         </div>
@@ -68,10 +69,10 @@
       <!-- Filters & Results Bar -->
       <div class="filter-bar">
         <div class="filter-pills" id="filterPills">
-          <button class="filter-pill active" data-filter="all">All Animals</button>
-          <button class="filter-pill" data-filter="healthy">Healthy Only</button>
-          <button class="filter-pill" data-filter="attention">Needs Attention</button>
-          <button class="filter-pill" data-filter="vaccine_due">Vaccines Due / Overdue</button>
+          <button class="filter-pill active" data-filter="all" aria-pressed="true">All Animals</button>
+          <button class="filter-pill" data-filter="healthy" aria-pressed="false">Healthy Only</button>
+          <button class="filter-pill" data-filter="attention" aria-pressed="false">Needs Attention</button>
+          <button class="filter-pill" data-filter="vaccine_due" aria-pressed="false">Vaccines Due / Overdue</button>
         </div>
         <span class="results-summary" id="resultsCount">Loading herd directory...</span>
       </div>
