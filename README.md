@@ -30,8 +30,8 @@ Push access to this repository is closed at the deadline. Anything not pushed by
 ## Getting Started
 
 ```bash
-git clone https://github.com/Embed-Club/team-asharis-team.git
-cd team-asharis-team
+git clone https://github.com/Embed-Club/Embers-16-AsharisTeam.git
+cd Embers-16-AsharisTeam
 ```
 
 Commit and push regularly. Your commit history is how progress is tracked.
