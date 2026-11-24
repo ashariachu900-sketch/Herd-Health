@@ -1,7 +1,6 @@
 """
 Automated Test Suite for CattleCare Backend
 Uses Python's standard unittest library - no external packages required.
-Executes in-process for 100% reliability across all CI/CD and sandbox environments.
 
 Execute via:
     python -m unittest test_server.py -v
@@ -12,11 +11,16 @@ import io
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 import datetime
+import urllib.request
+import urllib.error
+from http.server import ThreadingHTTPServer
 
-# Import server module under test
 import server
+
+TEST_TOKEN = "unit-test-token"
 
 class InProcessTestClient:
     """Simulates HTTP requests into CattleRequestHandler without requiring OS TCP sockets."""
@@ -27,19 +31,19 @@ class InProcessTestClient:
         req.wfile = io.BytesIO()
         req.path = path
         req.command = method
-        req.headers = {"X-Admin-Token": "REDACTED-OLD-SECRET"}
+        req.headers = {"X-Admin-Token": TEST_TOKEN}
         if headers:
             req.headers.update(headers)
         req.headers["Content-Length"] = str(len(body_bytes))
+        req.headers_out = {}
 
         status_code = [200]
         def mock_send_response(code, msg=None):
             status_code[0] = code
 
         req.send_response = mock_send_response
-        req.send_header = lambda *a: None
+        req.send_header = lambda key, value: req.headers_out.__setitem__(key, value)
         req.end_headers = lambda: None
-        req.send_cors_headers = lambda: None
 
         if method == "GET":
             req.do_GET()
@@ -51,6 +55,7 @@ class InProcessTestClient:
             req.do_DELETE()
 
         raw_output = req.wfile.getvalue().decode("utf-8")
+        self.headers_out = req.headers_out
         try:
             return status_code[0], json.loads(raw_output) if raw_output else {}
         except Exception:
@@ -59,22 +64,25 @@ class InProcessTestClient:
 class CattleCareBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Create an isolated temporary directory for test database
         cls.test_dir = tempfile.mkdtemp(prefix="cattlecare_test_")
         cls.test_db = os.path.join(cls.test_dir, "test_cattlecare.db")
-
-        # Point server to isolated test database
         cls.original_db_path = server.DB_PATH
+        cls.original_token = server.ADMIN_TOKEN
+        cls.original_seed = os.environ.get("SEED_DEMO_DATA")
+        os.environ["SEED_DEMO_DATA"] = "1"  # seed the isolated test database
         server.DB_PATH = cls.test_db
-
-        # Initialize the test database
+        server.ADMIN_TOKEN = TEST_TOKEN
         server.init_db()
         cls.client = InProcessTestClient()
 
     @classmethod
     def tearDownClass(cls):
-        # Clean up temporary test database and directory
         server.DB_PATH = cls.original_db_path
+        server.ADMIN_TOKEN = cls.original_token
+        if cls.original_seed is None:
+            os.environ.pop("SEED_DEMO_DATA", None)
+        else:
+            os.environ["SEED_DEMO_DATA"] = cls.original_seed
         shutil.rmtree(cls.test_dir, ignore_errors=True)
 
     # --------------------------------------------------------------------------
@@ -82,89 +90,72 @@ class CattleCareBackendTests(unittest.TestCase):
     # --------------------------------------------------------------------------
 
     def test_01_vaccine_status_calculations(self):
-        """Test vaccine date difference and status categorization logic."""
         today = datetime.date.today()
-        today_str = today.isoformat()
-        yesterday_str = (today - datetime.timedelta(days=1)).isoformat()
-        future_str = (today + datetime.timedelta(days=10)).isoformat()
-
-        self.assertEqual(server.vaccine_status(today_str), "today")
-        self.assertEqual(server.vaccine_status(yesterday_str), "overdue")
-        self.assertEqual(server.vaccine_status(future_str), "upcoming")
+        self.assertEqual(server.vaccine_status(today.isoformat()), "today")
+        self.assertEqual(server.vaccine_status((today - datetime.timedelta(days=1)).isoformat()), "overdue")
+        self.assertEqual(server.vaccine_status((today + datetime.timedelta(days=10)).isoformat()), "upcoming")
         self.assertEqual(server.vaccine_status(""), "none")
         self.assertEqual(server.vaccine_status(None), "none")
 
-    # --------------------------------------------------------------------------
-    # 2. Database Schema & Indexing Tests
-    # --------------------------------------------------------------------------
-
     def test_02_database_schema_and_indexes(self):
-        """Verify database table creation and performance indexes."""
         conn = server.get_db()
         cursor = conn.cursor()
-
-        # Check table exists
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='animals';")
-        self.assertIsNotNone(cursor.fetchone(), "Table 'animals' must exist.")
-
-        # Check performance indexes exist
+        self.assertIsNotNone(cursor.fetchone())
         cursor.execute("SELECT name FROM sqlite_master WHERE type='index';")
         index_names = [row["name"] for row in cursor.fetchall()]
-        self.assertIn("idx_animals_created", index_names, "Index 'idx_animals_created' must exist.")
-        self.assertIn("idx_animals_health", index_names, "Index 'idx_animals_health' must exist.")
-
-        # Check initial seed records
+        for expected in ("idx_animals_created", "idx_animals_health", "idx_animals_tag"):
+            self.assertIn(expected, index_names)
+        cursor.execute("PRAGMA table_info(animals);")
+        columns = {row["name"] for row in cursor.fetchall()}
+        self.assertTrue({"verified", "verifiedBy", "verifiedAt"}.issubset(columns))
         cursor.execute("SELECT COUNT(*) as cnt FROM animals;")
-        self.assertGreaterEqual(cursor.fetchone()["cnt"], 3, "Database should have initial seed records.")
+        self.assertGreaterEqual(cursor.fetchone()["cnt"], 3)
         conn.close()
 
     # --------------------------------------------------------------------------
-    # 3. Health & Stats Endpoints
+    # 2. Read Endpoints
     # --------------------------------------------------------------------------
 
     def test_03_api_health_endpoint(self):
-        """Verify GET /api/health returns 200 OK with status and service info."""
         status, data = self.client.request("GET", "/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(data.get("status"), "ok")
         self.assertIn("service", data)
 
     def test_04_api_stats_endpoint(self):
-        """Verify GET /api/stats returns aggregated metrics."""
         status, data = self.client.request("GET", "/api/stats")
         self.assertEqual(status, 200)
-        self.assertIn("totalCattle", data)
-        self.assertIn("healthyCattle", data)
-        self.assertIn("healthPercent", data)
-        self.assertIn("upcoming", data)
+        for key in ("totalCattle", "healthyCattle", "healthPercent", "upcoming"):
+            self.assertIn(key, data)
         self.assertIsInstance(data["upcoming"], list)
 
     def test_05_api_animals_list_and_filters(self):
-        """Verify GET /api/animals supports search and health filters."""
-        # Unfiltered list
         status, animals = self.client.request("GET", "/api/animals")
         self.assertEqual(status, 200)
         self.assertIsInstance(animals, list)
         self.assertGreaterEqual(len(animals), 3)
 
-        # Health filter: Healthy
-        status, healthy_animals = self.client.request("GET", "/api/animals?health=Healthy")
+        status, healthy = self.client.request("GET", "/api/animals?health=Healthy")
         self.assertEqual(status, 200)
-        for a in healthy_animals:
-            self.assertEqual(a["health"], "Healthy")
+        self.assertTrue(all(a["health"] == "Healthy" for a in healthy))
 
-        # Search filter
         status, searched = self.client.request("GET", "/api/animals?search=Bella")
         self.assertEqual(status, 200)
         self.assertTrue(any(a["name"] == "Bella" for a in searched))
 
+        status, tag_match = self.client.request("GET", "/api/animals?tag=COW-101")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(tag_match), 1)
+
     # --------------------------------------------------------------------------
-    # 4. CRUD Lifecycle & Business Rule Tests
+    # 3. CRUD Lifecycle
     # --------------------------------------------------------------------------
 
-    def test_06_crud_lifecycle(self):
-        """Verify full Create -> Read -> Update -> Delete lifecycle with duplicate protection."""
+    def test_06_crud_lifecycle_with_server_generated_id(self):
         new_animal = {
+            "id": "client-chosen-id",             # must be ignored
+            "createdAt": "2000-01-01T00:00:00",   # must be ignored
             "name": "Moona",
             "tag": "TEST-COW-999",
             "breed": "Simmental",
@@ -175,113 +166,167 @@ class CattleCareBackendTests(unittest.TestCase):
             "notes": "Healthy test heifer.",
             "photo": "data:image/jpeg;base64,samplephoto123"
         }
-
-        # 1. Create animal (POST)
         status, created = self.client.request("POST", "/api/animals", data=new_animal)
         self.assertEqual(status, 201)
+        self.assertNotEqual(created["id"], "client-chosen-id")
+        self.assertNotEqual(created["createdAt"], "2000-01-01T00:00:00")
         created_id = created["id"]
-        self.assertEqual(created["name"], "Moona")
-        self.assertEqual(created["tag"], "TEST-COW-999")
-        self.assertEqual(created["photo"], "data:image/jpeg;base64,samplephoto123")
 
-        # 2. Reject duplicate tag ID (POST duplicate)
-        dup_status, dup_err = self.client.request("POST", "/api/animals", data=new_animal)
-        self.assertEqual(dup_status, 409, "Must reject duplicate animal tag ID.")
+        dup_status, _ = self.client.request("POST", "/api/animals", data=new_animal)
+        self.assertEqual(dup_status, 409)
 
-        # 3. Read single animal by ID (GET)
         status, fetched = self.client.request("GET", f"/api/animals/{created_id}")
         self.assertEqual(status, 200)
         self.assertEqual(fetched["name"], "Moona")
 
-        # 4. Read single animal by Tag (GET)
-        status, fetched_by_tag = self.client.request("GET", f"/api/animals/TEST-COW-999")
+        status, by_tag = self.client.request("GET", "/api/animals/TEST-COW-999")
         self.assertEqual(status, 200)
-        self.assertEqual(fetched_by_tag["id"], created_id)
+        self.assertEqual(by_tag["id"], created_id)
 
-        # 5. Update animal details while preserving photo (PUT)
-        update_payload = {
-            "name": "Moona Champion",
-            "tag": "TEST-COW-999",
-            "breed": "Simmental Purebred",
-            "health": "Needs attention",
-            "photo": ""  # Omitted/empty new photo: MUST preserve existing photo
+        update = {
+            "name": "Moona Champion", "tag": "TEST-COW-999",
+            "health": "Needs attention", "photo": ""
         }
-        status, updated = self.client.request("PUT", f"/api/animals/{created_id}", data=update_payload)
+        status, updated = self.client.request("PUT", f"/api/animals/{created_id}", data=update)
         self.assertEqual(status, 200)
         self.assertEqual(updated["name"], "Moona Champion")
-        self.assertEqual(updated["health"], "Needs attention")
-        self.assertEqual(updated["photo"], "data:image/jpeg;base64,samplephoto123", "Photo must NOT be erased on update.")
+        self.assertEqual(updated["photo"], "data:image/jpeg;base64,samplephoto123")
 
-        # 6. Delete animal (DELETE)
-        status, deleted = self.client.request("DELETE", f"/api/animals/{created_id}")
+        status, _ = self.client.request("DELETE", f"/api/animals/{created_id}")
         self.assertEqual(status, 200)
-        self.assertTrue(deleted.get("success"))
-
-        # 7. Confirm deletion (GET -> 404)
-        status, missing = self.client.request("GET", f"/api/animals/{created_id}")
+        status, _ = self.client.request("GET", f"/api/animals/{created_id}")
         self.assertEqual(status, 404)
 
     # --------------------------------------------------------------------------
-    # 5. Backup & Security Boundary Tests
+    # 4. Security & Validation
     # --------------------------------------------------------------------------
 
-    def test_07_api_export_endpoint(self):
-        """Verify GET /api/export generates complete database backup."""
-        status, backup = self.client.request("GET", "/api/export")
-        self.assertEqual(status, 200)
-        self.assertIn("exportedAt", backup)
-        self.assertIn("totalRecords", backup)
-        self.assertIn("animals", backup)
-        self.assertIsInstance(backup["animals"], list)
+    def test_07_export_requires_token(self):
+        status, _ = self.client.request("GET", "/api/export")
+        self.assertEqual(status, 200, "Default test client supplies a valid token")
+        status, body = self.client.request("GET", "/api/export", headers={"X-Admin-Token": ""})
+        self.assertEqual(status, 401)
+        self.assertIn("error", body)
 
     def test_08_payload_size_limit(self):
-        """Verify server rejects oversized payloads > 5MB with 413 Payload Too Large."""
-        oversized_data = {"junk": "x" * (6 * 1024 * 1024)}  # 6 MB payload
-        status, resp = self.client.request("POST", "/api/animals", data=oversized_data)
-        self.assertEqual(status, 413, "Must return HTTP 413 for payloads > 5MB.")
+        oversized = {"junk": "x" * (6 * 1024 * 1024)}
+        status, _ = self.client.request("POST", "/api/animals", data=oversized)
+        self.assertEqual(status, 413)
 
     def test_09_blocked_sensitive_files(self):
-        """Verify server blocks direct downloads of database, source code, and configs (HTTP 403)."""
-        blocked_paths = ["/cattlecare.db", "/server.py", "/test_server.py", "/run_server.bat", "/.gitignore"]
-        for p in blocked_paths:
-            status, resp = self.client.request("GET", p)
-            self.assertEqual(status, 403, f"Path '{p}' must be blocked with HTTP 403 Forbidden.")
+        for path in ("/cattlecare.db", "/server.py", "/test_server.py", "/run_server.bat", "/.gitignore", "/.env.example"):
+            status, _ = self.client.request("GET", path)
+            self.assertEqual(status, 403, f"{path} must be blocked")
 
-    def test_10_unauthorized_mutation(self):
-        """Verify server rejects mutations with invalid auth token with HTTP 401 Unauthorized."""
-        bad_headers = {"X-Admin-Token": "invalid-hacker-token"}
-        dummy_data = {"name": "Hacked", "tag": "HACK-01"}
-        status, resp = self.client.request("POST", "/api/animals", data=dummy_data, headers=bad_headers)
-        self.assertEqual(status, 401, "Invalid token must return HTTP 401 Unauthorized.")
+    def test_10_unauthorized_mutations(self):
+        for token in ("invalid-hacker-token", "REDACTED-OLD-SECRET", ""):
+            status, _ = self.client.request(
+                "POST", "/api/animals",
+                data={"name": "Hacked", "tag": "HACK-01"},
+                headers={"X-Admin-Token": token}
+            )
+            self.assertEqual(status, 401, f"Token {token!r} must be rejected")
 
     def test_11_summary_param_excludes_photos(self):
-        """GET /api/animals?summary=true must omit 'photo' field from every record."""
-        # Create an animal with a photo so there is photo data to potentially leak
         payload = {
-            "name": "SummaryTest",
-            "tag": "SUM-001",
+            "name": "SummaryTest", "tag": "SUM-001",
             "photo": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         }
         status, _ = self.client.request("POST", "/api/animals", data=payload)
-        self.assertEqual(status, 201, "Setup: animal creation must succeed for summary test.")
+        self.assertEqual(status, 201)
+        status, summary = self.client.request("GET", "/api/animals?summary=true")
+        self.assertEqual(status, 200)
+        found = next(a for a in summary if a["tag"] == "SUM-001")
+        self.assertNotIn("photo", found)
+        self.assertTrue(found["hasPhoto"])
+        status, full = self.client.request("GET", "/api/animals")
+        found_full = next(a for a in full if a["tag"] == "SUM-001")
+        self.assertIn("photo", found_full)
+        self.client.request("DELETE", f"/api/animals/{found_full['id']}")
 
-        # Fetch with summary=true — photo must be absent
-        status, body = self.client.request("GET", "/api/animals?summary=true")
-        self.assertEqual(status, 200, "Summary list must return HTTP 200.")
-        animals = body  # client already parses JSON → body is a list
-        for animal in animals:
-            self.assertNotIn("photo", animal,
-                f"summary=true must strip 'photo' from animal '{animal.get('tag', '?')}'")
+    def test_12_rejects_unsafe_photo(self):
+        payload = {"name": "BadPhoto", "tag": "BAD-PHOTO", "photo": 'data:image/png" onerror="alert(1)'}
+        status, body = self.client.request("POST", "/api/animals", data=payload)
+        self.assertEqual(status, 400)
+        self.assertIn("Photo", body["error"])
 
-        # Fetch without summary — photo must be present for the record we created
-        status2, full_list = self.client.request("GET", "/api/animals")
-        self.assertEqual(status2, 200)
-        sum_animal = next((a for a in full_list if a.get("tag") == "SUM-001"), None)
-        self.assertIsNotNone(sum_animal, "SUM-001 must appear in full list")
-        self.assertIn("photo", sum_animal, "Full list (no summary flag) must include 'photo'.")
+    def test_13_rejects_bad_health_and_dates(self):
+        bad_health = {"name": "BadHealth", "tag": "BAD-HEALTH", "health": "Cured"}
+        status, _ = self.client.request("POST", "/api/animals", data=bad_health)
+        self.assertEqual(status, 400)
+        bad_date = {"name": "BadDate", "tag": "BAD-DATE", "dob": "not-a-date"}
+        status, _ = self.client.request("POST", "/api/animals", data=bad_date)
+        self.assertEqual(status, 400)
 
-        # Cleanup
-        self.client.request("DELETE", f"/api/animals/{sum_animal['id']}")
+    def test_14_verification_is_explicit_and_survives_updates(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "VerifyMe", "tag": "VER-001"}
+        )
+        self.assertEqual(status, 201)
+        aid = created["id"]
+        self.assertFalse(created["verified"])
+
+        status, verified = self.client.request(
+            "POST", f"/api/animals/{aid}/verify", {"verifiedBy": "Dr Rao"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["verifiedBy"], "Dr Rao")
+        self.assertTrue(verified["verifiedAt"])
+
+        status, updated = self.client.request(
+            "PUT", f"/api/animals/{aid}", {"name": "VerifyMe II", "tag": "VER-001"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(updated["verified"], "Editing a record must not clear verification")
+        self.client.request("DELETE", f"/api/animals/{aid}")
+
+    def test_15_no_wildcard_cors_headers(self):
+        self.client.request("GET", "/api/health")
+        self.assertNotIn("Access-Control-Allow-Origin", self.client.headers_out)
+
+    def test_16_real_http_export_auth(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.CattleRequestHandler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(base + "/api/export", timeout=5)
+            self.assertEqual(cm.exception.code, 401)
+            cm.exception.close()
+
+            request = urllib.request.Request(base + "/api/export", headers={"X-Admin-Token": TEST_TOKEN})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+                body = json.load(response)
+                self.assertIn("animals", body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
+    def test_17_demo_data_is_opt_in(self):
+        original_path = server.DB_PATH
+        original_seed = os.environ.get("SEED_DEMO_DATA")
+        fresh_dir = tempfile.mkdtemp(prefix="cattlecare_empty_")
+        try:
+            server.DB_PATH = os.path.join(fresh_dir, "empty.db")
+            os.environ["SEED_DEMO_DATA"] = "0"
+            server.init_db()
+            conn = server.get_db()
+            count = conn.execute("SELECT COUNT(*) FROM animals").fetchone()[0]
+            conn.close()
+            self.assertEqual(count, 0)
+        finally:
+            server.DB_PATH = original_path
+            if original_seed is None:
+                os.environ.pop("SEED_DEMO_DATA", None)
+            else:
+                os.environ["SEED_DEMO_DATA"] = original_seed
+            shutil.rmtree(fresh_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

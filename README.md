@@ -1,116 +1,133 @@
-# CattleCare — Sustainable Herd Management System & Public Verification Portal
+# CattleCare — Herd Management System & Health Passport Portal
 
-A complete, production-hardened full-stack livestock management ecosystem featuring an administrative workspace for farmers and a public/veterinarian verification portal for inspecting cattle health passports.
+A full-stack livestock records app with two sides: a **Farmer Workspace** for registering cattle, recording vaccinations and clinical notes, generating QR tags and downloading backups; and a **Public/Vet Portal** that renders those records as a printable health passport with live vaccination countdowns. The backend is a multithreaded Python standard-library HTTP server backed by SQLite (WAL mode). There are no third-party Python packages.
 
 ---
 
-## 📁 Project Structure
+## Project structure
 
 ```
 catil helth/
-│
-├── index.html        # Farmer Workspace (Single-page app for herd management & registration)
-├── style.css         # Solarpunk design system & responsive styles for the farmer workspace
-├── script.js         # Frontend client logic & REST API integration for farmer workspace
-│
-├── portal.html       # Public & Vet Verification Portal (read/inspect animal passports)
-├── portal.css        # Clean styles, cards, and print stylesheet for the portal
-├── portal.js         # Search, filter pills, URL routing & passport renderer
-│
-├── server.py         # Multi-threaded Python REST API + SQLite WAL database + static files
-├── test_server.py    # Automated test suite (8 integration & unit tests, 100% pass)
-├── cattlecare.db     # SQLite database storing herd records permanently (git-ignored)
-├── .gitignore        # Ignores runtime databases, bytecode, and IDE configurations
-├── run_server.bat    # One-click Windows launcher to start the backend server
-└── README.md         # Documentation & user manual
+├── index.html        Farmer workspace (SPA shell)
+├── style.css         Farmer workspace styles
+├── script.js         Farmer workspace client logic
+├── portal.html       Public/vet verification portal
+├── portal.css        Portal styles and print stylesheet
+├── portal.js         Portal search, filters and passport renderer
+├── server.py         REST API + static file server
+├── test_server.py    17 automated tests (unittest, no dependencies)
+├── cattlecare.db     SQLite data (git-ignored)
+├── .env.example      Environment variable reference
+├── run_server.bat    Windows launcher
+├── LICENSE           MIT
+└── README.md         This file
 ```
 
 ---
 
-## 🏛 Architecture Diagram
+## Quick start (under 5 minutes)
 
+**1. Set the admin token.** It is required for all writes and backups; there is no default credential.
+
+PowerShell:
+```powershell
+$env:FARM_ADMIN_TOKEN = "choose-a-long-random-string"
 ```
- ┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
- │     1. Farmer Workspace              │        │  2. Public & Vet Inspection Portal   │
- │        (index.html)                  │        │     (portal.html / ?tag=COW-101)     │
- │  • Register new animals              │        │  • Search herd by ID, Name, Breed    │
- │  • Record vaccines & dates           │        │  • Inspect verified health passports │
- │  • Write clinical doctor notes       │        │  • Check immunization countdowns     │
- │  • Generate printable QR tags        │        │  • Print official health certificate │
- └──────────────────┬───────────────────┘        └──────────────────┬───────────────────┘
-                    │                                               │
-                    │         REST API (GET / POST / PUT)           │
-                    └───────────────────┬───────────────────────────┘
-                                        ▼
-                        ┌───────────────────────────────┐
-                        │   Multi-Threaded Server       │
-                        │    (ThreadingHTTPServer)      │
-                        │    • Anti-DoS 5MB Guard       │
-                        │    • Token-Protected Writes   │
-                        │               ▲               │
-                        │               ▼               │
-                        │   Persistent SQLite Database  │
-                        │    • WAL Mode Concurrency     │
-                        │    • Indexed createdAt/health │
-                        └───────────────────────────────┘
+
+Command Prompt:
+```bat
+set FARM_ADMIN_TOKEN=choose-a-long-random-string
+```
+
+`run_server.bat` will prompt for one if you skip this step.
+
+**2. Start the server.** Double-click `run_server.bat`, or run:
+```bat
+python server.py
+```
+The server binds to `127.0.0.1:8000` only. Set `PORT` to use a different port.
+
+**3. Open the app.**
+- Farmer Workspace: http://localhost:8000/
+- Public/Vet Portal: http://localhost:8000/portal.html
+- A specific passport: http://localhost:8000/portal.html?tag=COW-101
+
+New databases start empty. If you want the three sample cows for a demo, set `SEED_DEMO_DATA=1` **before the first run**. Never use demo data for real records.
+
+---
+
+## The two portals
+
+### Farmer Workspace (`index.html`)
+- Register/edit cattle with a resized photo (max 850px, JPEG quality 0.76).
+- Set health status, vaccine name and last/next vaccination dates.
+- Write clinical notes and see overdue/upcoming care on the dashboard.
+- Generate and download a QR code per animal; export a JSON backup.
+
+### Public/Vet Portal (`portal.html`)
+- Search by tag ID, name, breed or notes; filter by health or vaccine-due status.
+- Printable animal passport with age, vaccination countdown and clinical notes.
+- **Verification is explicit:** the certificate says "Vet Verified Record" only when an admin has called the verify endpoint. Otherwise it clearly says "Farmer entry — not vet-verified".
+
+When you save or delete in the Farmer Workspace, the browser asks for the admin passcode once per session (`sessionStorage`).
+
+---
+
+## REST API
+
+All responses are JSON. Writes and exports require the `X-Admin-Token` header (or `Authorization: Bearer <token>`).
+
+| Method | Endpoint | Auth | Purpose |
+|--------|----------|------|---------|
+| GET | `/api/health` | No | Liveness check |
+| GET | `/api/animals` | No | List; supports `?search=`, `?tag=`, `?health=`, `?summary=true` (omits photo blobs) |
+| GET | `/api/animals/<id-or-tag>` | No | Single record, including photo |
+| POST | `/api/animals` | Yes | Create; validates fields, generates id/timestamp server-side |
+| PUT | `/api/animals/<id>` | Yes | Update; preserves photo and verification when omitted |
+| DELETE | `/api/animals/<id>` | Yes | Delete |
+| POST | `/api/animals/<id>/verify` | Yes | Set `verified`, `verifiedBy`, `verifiedAt` |
+| GET | `/api/stats` | No | Dashboard aggregates |
+| GET | `/api/export` | Yes | Full JSON backup |
+
+Example verification call:
+```powershell
+$body = @{ verifiedBy = "Dr Rao" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/animals/COW-101/verify" `
+  -Headers @{ "X-Admin-Token" = $env:FARM_ADMIN_TOKEN } -Body $body -ContentType "application/json"
+```
+
+To remove demo cows from the database:
+```powershell
+python -c "import sqlite3; c=sqlite3.connect('cattlecare.db'); c.execute(\"DELETE FROM animals WHERE id LIKE 'seed-%'\"); c.commit()"
 ```
 
 ---
 
-## 🌐 The Two Web Portals
+## Security notes
 
-### 1. Farmer Management Workspace (`index.html`)
-👉 **URL:** `http://localhost:8000` or `http://localhost:8000/index.html`
-* **Purpose:** For the farm manager or cattle owner.
-* **Capabilities:**
-  * Register new cattle with photos and medical history.
-  * Update health status (`Healthy` vs `Needs attention`).
-  * Record vaccines given and schedule next vaccination dates.
-  * Write and maintain clinical doctor observations and feeding notes.
-  * Generate and download scannable QR codes for ear tags and barn clipboards.
-  * Manage herd statistics and overdue vaccination reminders.
-
-### 2. Public & Veterinarian Health Portal (`portal.html`)
-👉 **URL:** `http://localhost:8000/portal.html`
-* **Purpose:** For veterinarians, cattle inspectors, buyers, and dairy cooperatives to access and verify records entered by the farmer.
-* **Capabilities:**
-  * **Tag ID & Name Search:** Quickly lookup any cow by Tag ID (e.g. `COW-101`), Name, or Breed.
-  * **Filter by Condition:** Filter herd by Healthy, Needs Attention / Quarantine, or Vaccinations Due.
-  * **Digital Cattle Passport / Certificate (`portal.html?tag=COW-101`):**
-    * Displays official verified pedigree, age, photo, and registration date.
-    * Real-time vaccination countdown (e.g. "Due in 14 days", "Overdue by 4 days").
-    * Complete veterinary clinical notes and treatment history entered by the farmer.
-    * **Print / Export PDF:** Single-click printable medical certificate with clean print styling.
-    * **Share Link:** One-click copy of the animal's permanent passport link.
-  * **Direct QR Code Access:** Scanning any animal's QR code automatically opens its passport in this portal!
+- `FARM_ADMIN_TOKEN` must be set at startup; the server exits without it. Use a long random value and change it if it was ever committed.
+- CORS is intentionally absent: the pages and API are same-origin. Do not add `Access-Control-Allow-Origin: *` to write endpoints.
+- `/api/export` returns medical notes and photos, so it requires the admin token.
+- Photo input is restricted to small base64 image data URIs, and all user fields are HTML-escaped before rendering.
+- Offline editing is disabled on purpose: local-only edits would be silently lost when the server reconnects. The app still shows records from a local cache when offline, read-only.
+- The verification stamp reflects a stored flag, not merely the fact that a page was opened. For a real deployment you would also add an audit log and a signed/tamper-evident certificate.
+- The server binds to loopback. For public access, put it behind a TLS reverse proxy and restrict who can reach admin routes.
 
 ---
 
-## 🧪 Automated Testing
+## Testing
 
-Run the included automated integration and unit test suite:
-```bash
+```bat
 python -m unittest test_server.py -v
 ```
-All 8 test suites verify:
-1. Vaccine status and date difference calculations.
-2. SQLite schema creation, WAL journal mode, and performance indexes.
-3. `/api/health` system availability.
-4. `/api/stats` aggregation metrics.
-5. `/api/animals` list, search queries, and health filtering.
-6. Full CRUD lifecycle: Create, Duplicate Tag rejection, Read by ID/Tag, Update with photo preservation, Delete, and 404 confirmation.
-7. `/api/export` JSON database backup generation.
-8. Anti-DoS payload size enforcement (HTTP 413 for payloads > 5MB).
+17 tests cover date logic, schema/indexes, list/search/filter endpoints, full CRUD, backup auth, payload limits, blocked files, invalid auth (including the old hardcoded token), unsafe photo rejection, input validation, explicit verification, absence of wildcard CORS, real socket behaviour and demo-data opt-in.
 
 ---
 
-## 🚀 How to Run
+## Deployment
 
-### 1. Start the Server
-Double-click **`run_server.bat`** in the project folder.
+This is currently a local/demo setup: one `.bat` launcher, no Docker or CI. To deploy, add a service manager, a reverse proxy with HTTPS, a dedicated `FARM_ADMIN_TOKEN` in the host environment, regular backups via `/api/export`, and a migration step for `ensure_columns()` when upgrading older databases.
 
-### 2. Open in Browser
-* Open **`http://localhost:8000`** for the **Farmer Workspace**.
-* Open **`http://localhost:8000/portal.html`** for the **Public/Vet Inspection Portal**.
-* Or open a specific animal directly:
-  👉 **`http://localhost:8000/portal.html?tag=COW-101`**
+## License
+
+MIT — see `LICENSE`.

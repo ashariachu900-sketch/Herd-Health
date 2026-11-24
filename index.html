@@ -209,17 +209,16 @@
       <form id="animalForm">
         <input type="hidden" id="animalId">
         <div class="form-grid">
-          <label for="animalName">Animal name *</label><input id="animalName" required maxlength="50" placeholder="e.g. Daisy">
-          <label for="animalTag">Animal ID *</label><input id="animalTag" required maxlength="30" placeholder="e.g. COW-001">
-          <label for="animalBreed">Breed</label><input id="animalBreed" maxlength="50" placeholder="e.g. Holstein Friesian">
-          <label for="animalDob">Date of birth</label><input id="animalDob" type="date">
-          <label for="animalHealth">Health status</label>
-          <select id="animalHealth"><option>Healthy</option><option>Needs attention</option></select>
-          <label for="lastVaccineDate">Last vaccination date</label><input id="lastVaccineDate" type="date">
-          <label for="vaccineName">Vaccine name</label><input id="vaccineName" maxlength="70" placeholder="e.g. FMD vaccine">
-          <label for="nextVaccineDate">Next vaccination date</label><input id="nextVaccineDate" type="date">
-          <label for="doctorNotes" class="full-field">Doctor notes</label><textarea id="doctorNotes" rows="3" maxlength="1000" placeholder="Health observations, treatment and notes..."></textarea>
-          <label for="animalPhoto" class="full-field">Animal photo</label><input id="animalPhoto" type="file" accept="image/*"><small class="field-hint">Choose a JPG or PNG image. Large photos are resized before saving.</small>
+          <div class="field"><label for="animalName">Animal name *</label><input id="animalName" required maxlength="50" placeholder="e.g. Daisy"></div>
+          <div class="field"><label for="animalTag">Animal ID *</label><input id="animalTag" required maxlength="30" placeholder="e.g. COW-001"></div>
+          <div class="field"><label for="animalBreed">Breed</label><input id="animalBreed" maxlength="50" placeholder="e.g. Holstein Friesian"></div>
+          <div class="field"><label for="animalDob">Date of birth</label><input id="animalDob" type="date"></div>
+          <div class="field"><label for="animalHealth">Health status</label><select id="animalHealth"><option>Healthy</option><option>Needs attention</option></select></div>
+          <div class="field"><label for="lastVaccineDate">Last vaccination date</label><input id="lastVaccineDate" type="date"></div>
+          <div class="field"><label for="vaccineName">Vaccine name</label><input id="vaccineName" maxlength="70" placeholder="e.g. FMD vaccine"></div>
+          <div class="field"><label for="nextVaccineDate">Next vaccination date</label><input id="nextVaccineDate" type="date"></div>
+          <div class="field full-field"><label for="doctorNotes">Doctor notes</label><textarea id="doctorNotes" rows="3" maxlength="1000" placeholder="Health observations, treatment and notes..."></textarea></div>
+          <div class="field full-field"><label for="animalPhoto">Animal photo</label><input id="animalPhoto" type="file" accept="image/*"><small class="field-hint">Choose a JPG or PNG image. Large photos are resized before saving.</small></div>
         </div>
         <div class="form-actions">
           <button type="button" class="secondary-button" id="cancelForm">Cancel</button>

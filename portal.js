@@ -330,7 +330,7 @@ function showPassport(animal) {
   stamp.textContent = verified ? "✓ Vet Verified Record" : "⚠ Farmer entry — not vet-verified";
   stamp.classList.toggle("unverified", !verified);
   $("certificateTimestamp").textContent = verified
-    ? `Verified at: ${formatDate(animal.verifiedAt)} by ${animal.verifiedBy || " veterinarian"}`
+    ? `Verified at: ${formatDate(String(animal.verifiedAt || "").split("T")[0])} by ${animal.verifiedBy || "a veterinarian"}`
     : "No veterinary verification on file";
 }
 

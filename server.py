@@ -407,6 +407,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         if (
             base_name in BLOCKED_FILES
             or clean_path.startswith(".")
+            or "__pycache__" in clean_path
+            or (path.endswith("/") and path != "/")  # no directory listings
             or (ext and ext not in ALLOWED_STATIC_EXTENSIONS)
         ):
             self.send_json(403, {"error": "Access Denied: Direct file download prohibited."})

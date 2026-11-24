@@ -13,40 +13,35 @@ set PYTHON_CMD=
 python --version >nul 2>&1
 if %errorlevel% equ 0 (
     set PYTHON_CMD=python
-    goto run
+    goto find_token
 )
 
-:: Check if py launcher works
-py --version >nul 2>&1
+:: Check the py launcher (works with any installed Python 3)
+py -3 --version >nul 2>&1
 if %errorlevel% equ 0 (
-    set PYTHON_CMD=py
-    goto run
+    set PYTHON_CMD=py -3
+    goto find_token
 )
 
-:: Check AppData Python installation
-if exist "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe" (
-    set "PYTHON_CMD=%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
-    goto run
-)
-
-if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    set "PYTHON_CMD=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-    goto run
-)
-
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    set "PYTHON_CMD=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-    goto run
-)
-
-echo [ERROR] Python not found on your system!
+echo [ERROR] Python 3 not found on your system!
 echo Please install Python from https://www.python.org/downloads/
 echo.
 pause
 exit /b 1
 
+:find_token
+if not "%FARM_ADMIN_TOKEN%"=="" goto run
+echo This server needs an admin token for writes and backups.
+set /p FARM_ADMIN_TOKEN=Choose an admin token for this session: 
+
 :run
+if "%FARM_ADMIN_TOKEN%"=="" (
+    echo [ERROR] FARM_ADMIN_TOKEN cannot be empty.
+    pause
+    exit /b 1
+)
+
 echo Using Python: %PYTHON_CMD%
 echo.
-"%PYTHON_CMD%" server.py
+%PYTHON_CMD% server.py
 pause
