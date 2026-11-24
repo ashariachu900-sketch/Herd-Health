@@ -7,8 +7,8 @@
     open http://localhost:8765/test_frontend.html
   The page reports PASS or FAIL in #testResult and in the browser console.
 
-  This exercises the real script.js click handler with a mocked fetch: no token
-  in the request header or wrong download name makes the test fail.
+  This exercises the real script.js click handler with a mocked cookie session:
+  a leaked token header, missing CSRF header or wrong download name fails.
 -->
 <html lang="en">
 <head><meta charset="utf-8"><title>CattleCare frontend test harness</title></head>
@@ -17,7 +17,7 @@
   <pre id="testDetails"></pre>
 
   <!-- Minimal DOM expected by script.js at load time. -->
-  <input id="adminTokenInput" value="ignored-because-session-cache-is-set">
+  <input id="adminTokenInput" value="admin-passcode-not-stored-in-js">
   <button id="exportBackupBtn">Export backup</button>
   <span id="liveDot"></span><span id="liveStatus"></span>
   <span id="todayDate"></span><span id="footerYear"></span>
@@ -46,6 +46,10 @@
     window.__calls = [];
     window.__downloadName = "";
     window.__blobText = "";
+    window.__session = {
+      role: "admin", actor: "frontend-test", csrfToken: "frontend-test-csrf",
+      expiresAt: "2099-01-01T00:00:00"
+    };
 
     const jsonResponse = (payload, total) => ({
       ok: true,
@@ -56,7 +60,14 @@
 
     window.fetch = async (url, options = {}) => {
       window.__calls.push({ url: String(url), options });
-      if (String(url).endsWith("/api/animals")) return jsonResponse([]);
+      if (String(url).endsWith("/api/session")) {
+        if ((options.method || "GET") === "POST") {
+          return { ok: true, status: 201, json: async () => window.__session };
+        }
+        return jsonResponse(window.__session);
+      }
+      if (String(url).endsWith("/api/logout")) return jsonResponse({ success: true });
+      if (String(url).includes("/api/animals")) return jsonResponse([]);
       if (String(url).endsWith("/api/stats")) return jsonResponse({
         totalCattle: 1, healthyCattle: 1, attentionCattle: 0, dueVaccinations: 0,
         totalVaccines: 1, healthPercent: 100, upcoming: [], recent: []
@@ -75,7 +86,6 @@
     URL.revokeObjectURL = () => {};
     HTMLAnchorElement.prototype.click = function () { window.__downloadName = this.download; };
 
-    sessionStorage.setItem("farm_admin_token", "frontend-test-token");
     localStorage.setItem("cattlecare_solarpunk_v1", "[]");
   </script>
 
@@ -93,13 +103,16 @@
         await new Promise((resolve) => setTimeout(resolve, 150)); // let download() finish
 
         const exportCall = window.__calls.find((call) => call.url.endsWith("/api/export"));
-        const sentToken = exportCall?.options?.headers?.["X-Admin-Token"];
+        const headers = exportCall?.options?.headers || {};
+        const sentToken = headers["X-Admin-Token"];
+        const sentCsrf = headers["X-CSRF-Token"];
         const expectedName = `cattlecare_backup_${new Date().toISOString().split("T")[0]}.json`;
         let exported = {};
         try { exported = JSON.parse(window.__blobText); } catch (error) { /* reported below */ }
 
         checks.push(["export request issued", Boolean(exportCall)]);
-        checks.push(["admin token header sent", sentToken === "frontend-test-token"]);
+        checks.push(["token never leaked to JavaScript", sentToken === undefined]);
+        checks.push(["CSRF header sent from session", sentCsrf === "frontend-test-csrf"]);
         checks.push(["correct download filename", window.__downloadName === expectedName]);
         checks.push(["export payload downloaded", exported.totalRecords === 1 && exported.animals?.[0]?.tag === "TEST-1"]);
 

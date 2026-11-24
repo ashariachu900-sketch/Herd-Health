@@ -31,10 +31,9 @@ const $ = (id) => document.getElementById(id);
 
 async function init() {
   const urlParams = new URLSearchParams(window.location.search);
-  // Shared public links must open in the safe view, not the full vet view.
-  if (urlParams.get("public") === "1" && $("publicMode")) {
-    $("publicMode").checked = true;
-  }
+  // Public-safe is the only portal view. Full notes/photos live in the farmer
+  // workspace behind a session; a scanned tag can never unlock them.
+  if ($("publicMode")) $("publicMode").checked = true;
 
   await syncAnimals();
   setupEventListeners();
@@ -90,7 +89,7 @@ async function syncAnimals(page = 0) {
     limit: String(PAGE_SIZE),
     offset: String(page * PAGE_SIZE)
   });
-  if ($("publicMode")?.checked) params.set("public", "true");
+  params.set("public", "true"); // enforced regardless of the disabled checkbox
   const search = ($("searchInput")?.value || "").trim();
   if (search) params.set("search", search);
   const healthParam = {
@@ -146,25 +145,10 @@ async function fetchSafePassport(value) {
 
 /** Direct passport links must work even when the tag is on a later page. */
 async function findAnimal(value, kind) {
-  // In public mode never fall back to local cache: it may contain full records
-  // saved before the checkbox was enabled. Always ask the server for safe fields.
-  if ($("publicMode")?.checked) return fetchSafePassport(value);
-
-  const local = animals.find(a => kind === "tag"
-    ? (a.tag || "").toLowerCase() === value.toLowerCase()
-    : a.id === value);
-  // A safe list row has no notes; never reuse it as a full vet record.
-  if (local && (Object.prototype.hasOwnProperty.call(local, "notes") || !isBackendConnected)) {
-    return local;
-  }
-  if (!isBackendConnected) return null;
-  try {
-    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(value)}`);
-    if (res.ok) return await res.json();
-  } catch {
-    // Offline: the missing-record state is shown by the caller.
-  }
-  return null;
+  // The local cache can hold older full records. Never use it for a passport:
+  // only /api/passport is allowed to supply the safe fields.
+  void kind;
+  return fetchSafePassport(value);
 }
 
 function renderPagination() {
@@ -366,12 +350,12 @@ function renderDirectory() {
 // -----------------------------------------------------------------------------
 
 async function showPassport(animal) {
-  const publicMode = Boolean($("publicMode")?.checked);
-  if (publicMode && !animal?.careHighlights) {
+  const publicMode = true;
+  if (!animal?.careHighlights) {
     animal = (await fetchSafePassport(animal.id)) || animal;
-  } else if (!publicMode) {
-    await ensurePhoto(animal);
   }
+  const notesBox = $("doctorNotesBox");
+  if (notesBox) notesBox.hidden = true;
   $("directorySection").style.display = "none";
   $("missingRecord").hidden = true;
   document.body.classList.add("passport-open");
@@ -380,8 +364,7 @@ async function showPassport(animal) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   // Update URL query string without reloading page
-  const publicSuffix = publicMode ? "&public=1" : "";
-  const newUrl = `${window.location.pathname}?tag=${encodeURIComponent(animal.tag)}${publicSuffix}`;
+  const newUrl = `${window.location.pathname}?tag=${encodeURIComponent(animal.tag)}&public=1`;
   window.history.pushState({ animalId: animal.id }, "", newUrl);
 
   // Photo
@@ -423,15 +406,14 @@ async function showPassport(animal) {
   $("specNextVaccine").textContent = formatDate(animal.nextVaccineDate);
   $("specVaccineStatus").textContent = vStat.label;
 
-  // Doctor Notes are hidden in public-safe mode; the server does not return them there.
-  $("specDoctorNotes").textContent = publicMode
-    ? "Hidden in public-safe view."
-    : (animal.notes || "No clinical observations or doctor notes have been entered for this animal.");
+  // Clinical notes never reach this page: the public endpoint omits them and
+  // the container is hidden so no stale text can be printed or inspected.
+  $("specDoctorNotes").textContent = "";
 
   const highlights = $("careHighlights");
   if (highlights) {
     const events = animal.careHighlights || [];
-    highlights.innerHTML = `<h3>Recent care highlights</h3>` + (events.length
+    highlights.innerHTML = `<h2>Recent care highlights</h2>` + (events.length
       ? `<ul>${events.map(e => `<li>${escapeHTML(e.title)} · ${escapeHTML(e.occurredAt)}</li>`).join("")}</ul>`
       : `<span>No public care highlights recorded.</span>`);
     highlights.hidden = Boolean(publicMode && !events.length);
@@ -471,18 +453,8 @@ function setupEventListeners() {
   $("searchInput").addEventListener("input", reloadPage);
   $("searchButton").addEventListener("click", reloadPage);
 
-  $("publicMode")?.addEventListener("change", async () => {
-    // Refresh the list first; renderDirectory closes any open passport, then we
-    // reopen the same animal through the newly selected view.
-    const params = new URLSearchParams(window.location.search);
-    const key = params.get("tag") || params.get("id");
-    const kind = params.get("tag") ? "tag" : "id";
-    await refreshDirectory(0);
-    if (key) {
-      const found = await findAnimal(key, kind);
-      if (found) await showPassport(found);
-    }
-  });
+  // The public-safe toggle is deliberately disabled: this page has no private
+  // mode, and clinical notes must never be reachable from a scanned QR link.
 
   $("pagination")?.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-page]");

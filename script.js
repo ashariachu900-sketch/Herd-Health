@@ -16,42 +16,99 @@ const MS_PER_DAY = 86_400_000;
 const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
 // -----------------------------------------------------------------------------
-// Admin Token — stored in sessionStorage; prompts once per browser session
+// Session — the passcode is exchanged for an HttpOnly cookie; JS only keeps CSRF
 // -----------------------------------------------------------------------------
 
-/**
- * Returns the farm admin passcode from sessionStorage or the top-bar input.
- * No blocking prompt(): the user types the passcode once per browser session.
- * @returns {string} The admin token, or "" if it has not been entered yet.
- */
-function getAdminToken() {
-  const cached = sessionStorage.getItem("farm_admin_token");
-  if (cached) return cached;
+let sessionInfo = null; // { role, actor, csrfToken, expiresAt }
 
+async function restoreSession() {
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
+    if (res.ok) {
+      const info = await res.json();
+      sessionInfo = info.role ? info : null;
+    }
+  } catch {
+    sessionInfo = null; // Read-only safe view still works offline.
+  }
+  updateSessionUI();
+}
+
+async function loginAdmin() {
   const input = $("adminTokenInput");
   const token = (input?.value || "").trim();
   if (!token) {
     input?.focus();
     showToast("Enter the admin passcode in the top bar first.");
-    return "";
+    return;
   }
-  sessionStorage.setItem("farm_admin_token", token);
-  return token;
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, operator: ($("operatorInput")?.value || "").trim() })
+    });
+    if (!res.ok) {
+      sessionInfo = null;
+      updateSessionUI();
+      showToast("Wrong admin passcode. Try again.");
+      input?.focus();
+      return;
+    }
+    sessionInfo = await res.json();
+    if (input) input.value = "";
+    updateSessionUI();
+    showToast(`Signed in as ${sessionInfo.actor}. 🌿`);
+    await syncAnimals();
+    renderAll();
+    await hydratePhotos();
+    loadCareData();
+  } catch {
+    showToast("Sign-in failed: backend unavailable.");
+  }
 }
 
-/** Forget a rejected token so the user can correct it without reloading. */
-function clearAdminToken() {
-  sessionStorage.removeItem("farm_admin_token");
-  const input = $("adminTokenInput");
-  if (input) {
-    input.value = "";
-    input.focus();
+async function logoutAdmin() {
+  const previous = sessionInfo;
+  sessionInfo = null;
+  updateSessionUI();
+  try {
+    await fetch(`${API_BASE}/api/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: previous ? { "X-CSRF-Token": previous.csrfToken } : {}
+    });
+  } catch {
+    // Local state is cleared even if the network is down.
   }
+  await syncAnimals();
+  renderAll();
+  showToast("Signed out.");
 }
 
-/** Check silently: page loaders must not prompt before the user tries a write. */
-function hasAdminToken() {
-  return Boolean(sessionStorage.getItem("farm_admin_token") || ($("adminTokenInput")?.value || "").trim());
+function updateSessionUI() {
+  const label = $("sessionLabel");
+  if (label) label.textContent = sessionInfo ? `${sessionInfo.actor} · admin` : "Read-only view";
+  const login = $("loginBtn");
+  if (login) login.hidden = Boolean(sessionInfo);
+  const logout = $("logoutBtn");
+  if (logout) logout.hidden = !sessionInfo;
+}
+
+function hasAdminSession() {
+  return Boolean(sessionInfo && sessionInfo.role === "admin");
+}
+
+function authHeaders() {
+  return sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {};
+}
+
+/** Forget a rejected session so the user can correct the passcode without reloading. */
+function clearSession() {
+  sessionInfo = null;
+  updateSessionUI();
+  $("adminTokenInput")?.focus();
 }
 
 const PAGE_SIZE = 50;
@@ -255,16 +312,17 @@ async function loadCareData() {
 
 async function loadCareEvents() {
   const id = $("eventAnimal")?.value;
-  if (!id || !hasAdminToken()) {
+  if (!id || !hasAdminSession()) {
     careEvents = [];
     renderEvents();
     return;
   }
   try {
     const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`, {
-      headers: { "X-Admin-Token": getAdminToken() }
+      credentials: "same-origin",
+      headers: authHeaders()
     });
-    if (res.status === 401) { clearAdminToken(); return; }
+    if (res.status === 401) { clearSession(); return; }
     careEvents = res.ok ? await res.json() : [];
   } catch {
     careEvents = [];
@@ -286,16 +344,17 @@ function renderEvents() {
 
 async function loadAudit() {
   const list = $("auditList");
-  if (!list || !hasAdminToken()) {
+  if (!list || !hasAdminSession()) {
     auditEntries = [];
     renderAudit();
     return;
   }
   try {
     const res = await fetch(`${API_BASE}/api/audit`, {
-      headers: { "X-Admin-Token": getAdminToken() }
+      credentials: "same-origin",
+      headers: authHeaders()
     });
-    if (res.status === 401) { clearAdminToken(); return; }
+    if (res.status === 401) { clearSession(); return; }
     auditEntries = res.ok ? await res.json() : [];
   } catch {
     auditEntries = [];
@@ -477,6 +536,12 @@ $("animalForm").addEventListener("submit", async (event) => {
     photo
   };
 
+  if (!hasAdminSession()) {
+    $("formMessage").textContent = "Sign in with the admin passcode first.";
+    $("adminTokenInput")?.focus();
+    return;
+  }
+
   // Offline writes are disabled on purpose: a local-only edit would be silently
   // overwritten by syncAnimals() when the server comes back.
   if (!isBackendConnected) {
@@ -488,22 +553,20 @@ $("animalForm").addEventListener("submit", async (event) => {
   if (submitBtn) submitBtn.disabled = true;
 
   try {
-    // Send to Python REST API with Admin Token
+    // Session cookie authenticates; the CSRF header proves this page initiated the write.
     const url = existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`;
     const method = existingId ? "PUT" : "POST";
 
     const res = await fetch(url, {
       method,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Admin-Token": getAdminToken()
-      },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload)
     });
 
     const data = await res.json();
     if (res.status === 401) {
-      clearAdminToken();
+      clearSession();
       $("formMessage").textContent = "Wrong admin passcode. Re-enter it and try again.";
       return;
     }
@@ -540,14 +603,20 @@ async function deleteAnimal(id) {
     showToast("Offline: deleting is disabled so records cannot be lost.");
     return;
   }
+  if (!hasAdminSession()) {
+    showToast("Sign in with the admin passcode first.");
+    $("adminTokenInput")?.focus();
+    return;
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/animals/${id}`, {
       method: "DELETE",
-      headers: { "X-Admin-Token": getAdminToken() }
+      credentials: "same-origin",
+      headers: authHeaders()
     });
     if (res.status === 401) {
-      clearAdminToken();
+      clearSession();
       showToast("Wrong admin passcode. Re-enter it and try again.");
       return;
     }
@@ -662,7 +731,7 @@ function renderCattle() {
         <div class="animal-actions">
           <button class="small-button" data-action="edit" data-id="${escapeHTML(animal.id)}">Edit details</button>
           <button class="small-button" data-action="qr" data-id="${escapeHTML(animal.id)}">View QR</button>
-          <a class="small-button" href="portal.html?tag=${encodeURIComponent(animal.tag)}" target="_blank" style="text-decoration:none; display:inline-flex; align-items:center;">Passport ↗</a>
+          <a class="small-button" href="portal.html?tag=${encodeURIComponent(animal.tag)}&public=1" target="_blank" style="text-decoration:none; display:inline-flex; align-items:center;">Passport ↗</a>
           <button class="small-button danger" data-action="delete" data-id="${escapeHTML(animal.id)}">Delete</button>
         </div>
       </div>
@@ -705,8 +774,8 @@ function renderVaccinations() {
 
 function makeQrText(animal) {
   const host = window.location.protocol.startsWith("http") ? window.location.origin : "http://localhost:8000";
-  // Keep the QR small and scannable; clinical details belong in the passport, not on a tag.
-  return `${host}/portal.html?tag=${encodeURIComponent(animal.tag)}`;
+  // Keep the QR small and scannable; a scanned tag opens the safe passport only.
+  return `${host}/portal.html?tag=${encodeURIComponent(animal.tag)}&public=1`;
 }
 
 function renderQrCodes() {
@@ -904,10 +973,12 @@ document.addEventListener("click", event => {
 $("eventAnimal")?.addEventListener("change", loadCareEvents);
 $("eventForm")?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const token = getAdminToken();
-  if (!token) return;
-  const animalId = $("eventAnimal").value;
   const message = $("eventMessage");
+  if (!hasAdminSession()) {
+    if (message) message.textContent = "Sign in with the admin passcode first.";
+    return;
+  }
+  const animalId = $("eventAnimal").value;
   if (!animalId) {
     message.textContent = "Register an animal first.";
     return;
@@ -925,11 +996,12 @@ $("eventForm")?.addEventListener("submit", async (event) => {
   try {
     const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animalId)}/events`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload)
     });
     if (res.status === 401) {
-      clearAdminToken();
+      clearSession();
       message.textContent = "Wrong admin passcode. Event not saved.";
       return;
     }
@@ -947,6 +1019,13 @@ $("eventForm")?.addEventListener("submit", async (event) => {
   } catch {
     message.textContent = "Backend unavailable. Event not saved.";
   }
+});
+
+// Session controls
+$("loginBtn")?.addEventListener("click", loginAdmin);
+$("logoutBtn")?.addEventListener("click", logoutAdmin);
+$("adminTokenInput")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loginAdmin();
 });
 
 // Mobile sidebar
@@ -974,7 +1053,8 @@ if (backupBtn) {
     let res;
     try {
       res = await fetch(`${API_BASE}/api/export`, {
-        headers: { "X-Admin-Token": getAdminToken() }
+        credentials: "same-origin",
+        headers: authHeaders()
       });
     } catch (err) {
       // The paged local cache holds only the last viewed page. Downloading it
@@ -984,7 +1064,7 @@ if (backupBtn) {
     }
 
     if (res.status === 401) {
-      clearAdminToken();
+      clearSession();
       showToast("Wrong admin passcode. Backup not downloaded.");
       return;
     }
@@ -1008,6 +1088,7 @@ $("footerYear").textContent = new Date().getFullYear();
 
 // Initialize app: sync with backend, then render
 (async function init() {
+  await restoreSession();
   await syncAnimals();
   renderAll();
   await hydratePhotos();

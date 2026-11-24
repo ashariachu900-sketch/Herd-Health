@@ -5,8 +5,10 @@ Usage:
   python backup.py
 
 Writes a timestamped JSON file into BACKUP_DIR (default ./backups) and removes
-files older than BACKUP_RETENTION_DAYS (default 30). Schedule this with cron or
-a systemd timer, then copy the directory somewhere off-host.
+files older than BACKUP_RETENTION_DAYS (default 30). The export includes every
+table and base64-encoded photo files; restore.py can rebuild a database from it.
+Schedule this with cron or a systemd timer, then copy the directory somewhere
+off-host.
 """
 
 import os
@@ -15,7 +17,7 @@ import datetime
 import urllib.request
 
 ADMIN_TOKEN = os.environ.get("FARM_ADMIN_TOKEN")
-APP_URL = os.environ.get("APP_URL", "http://127.0.0.1:8000").rstrip("/")
+APP_URL = os.environ.get("APP_URL", "http://127.0.0.1:8000").rstrip("/") or "http://127.0.0.1:8000"
 BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "backups"
 ))
@@ -39,6 +41,10 @@ def main():
     path = os.path.join(BACKUP_DIR, f"cattlecare_backup_{stamp}.json")
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(path, 0o600)  # exports contain clinical notes and photo bytes
+    except OSError:
+        pass  # Windows: rely on the backup directory's ACL instead
 
     cutoff = datetime.datetime.now() - datetime.timedelta(days=RETENTION_DAYS)
     removed = 0
@@ -51,7 +57,9 @@ def main():
             os.remove(candidate)
             removed += 1
 
-    print(f"Backup written to {path} ({data.get('totalRecords', '?')} records)")
+    extras = sum(len(data.get(key, [])) for key in
+                 ("careEvents", "verificationLog", "auditLog", "photos"))
+    print(f"Backup written to {path} ({data.get('totalRecords', '?')} animals, {extras} related items)")
     print(f"Removed {removed} backup(s) older than {RETENTION_DAYS} days")
 
 

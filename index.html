@@ -5,6 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#173f32">
+  <meta name="description" content="CattleCare farmer workspace for herd records, care events, QR health passports and veterinary verification.">
   <title>CattleCare | Sustainable Farm Management</title>
   <link rel="stylesheet" href="style.css">
   <script src="vendor/qrcode.min.js"></script>
@@ -53,10 +54,17 @@
           <a href="portal.html" target="_blank" class="portal-header-btn" title="Open Public & Vet Inspection Portal">
             <span>🌐</span> Public / Vet Portal ↗
           </a>
+          <span class="session-label" id="sessionLabel">Read-only view</span>
           <label class="token-field">
             <span class="visually-hidden">Admin passcode</span>
             <input id="adminTokenInput" type="password" autocomplete="off" placeholder="Admin passcode" aria-label="Admin passcode">
           </label>
+          <label class="token-field">
+            <span class="visually-hidden">Operator name</span>
+            <input id="operatorInput" type="text" maxlength="50" autocomplete="name" placeholder="Operator (optional)" aria-label="Operator name for the audit trail">
+          </label>
+          <button class="small-button" id="loginBtn" type="button">Sign in</button>
+          <button class="small-button" id="logoutBtn" type="button" hidden>Sign out</button>
           <span class="live-dot" id="liveDot"></span>
           <span class="live-label" id="liveStatus">Connecting to backend...</span>
           <div class="avatar">🌱</div>
@@ -180,7 +188,7 @@
         </div>
         <div class="vaccine-summary" id="vaccineSummary"></div>
         <div class="panel">
-          <div class="panel-heading"><div><span class="eyebrow">HERD HEALTH RECORDS</span><h3>Vaccination schedule</h3></div></div>
+          <div class="panel-heading"><div><span class="eyebrow">HERD HEALTH RECORDS</span><h2>Vaccination schedule</h2></div></div>
           <div class="table-wrap">
             <table>
               <thead><tr><th>Animal</th><th>Vaccine</th><th>Last given</th><th>Next date</th><th>Status</th></tr></thead>
@@ -205,7 +213,7 @@
         </div>
 
         <div class="panel care-entry-panel">
-          <div class="panel-heading"><div><span class="eyebrow">ADD AN EVENT</span><h3>What happened?</h3></div></div>
+          <div class="panel-heading"><div><span class="eyebrow">ADD AN EVENT</span><h2>What happened?</h2></div></div>
           <form id="eventForm" class="care-form">
             <select id="eventAnimal" aria-label="Animal"></select>
             <select id="eventType" aria-label="Event type">
@@ -215,9 +223,12 @@
               <option value="observation">Observation</option>
               <option value="movement">Movement</option>
             </select>
-            <input id="eventTitle" maxlength="80" placeholder="Short title, e.g. Annual FMD booster" required>
-            <input id="eventDate" type="date" required>
-            <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..."></textarea>
+            <label class="visually-hidden" for="eventTitle">Event title</label>
+            <input id="eventTitle" maxlength="80" placeholder="Short title, e.g. Annual FMD booster" aria-label="Event title" required>
+            <label class="visually-hidden" for="eventDate">Event date</label>
+            <input id="eventDate" type="date" aria-label="Event date" required>
+            <label class="visually-hidden" for="eventDetails">Event details</label>
+            <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..." aria-label="Event details"></textarea>
             <button type="submit" class="primary-button" id="saveEventBtn">＋ Add event</button>
           </form>
           <p class="form-message" id="eventMessage" role="status"></p>
@@ -225,11 +236,11 @@
 
         <div class="dashboard-grid">
           <section class="panel">
-            <div class="panel-heading"><div><span class="eyebrow">PER ANIMAL</span><h3>Care timeline</h3></div></div>
+            <div class="panel-heading"><div><span class="eyebrow">PER ANIMAL</span><h2>Care timeline</h2></div></div>
             <div id="eventTimeline" class="event-timeline"></div>
           </section>
           <section class="panel">
-            <div class="panel-heading"><div><span class="eyebrow">ACCOUNTABILITY</span><h3>Audit trail</h3></div></div>
+            <div class="panel-heading"><div><span class="eyebrow">ACCOUNTABILITY</span><h2>Audit trail</h2></div></div>
             <div id="auditList" class="audit-list"></div>
           </section>
         </div>

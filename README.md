@@ -1,4 +1,4 @@
-# asharis team
+# CattleCare — Asharis Team
 
 **EMBEDTHON'26**
 Embed Club, Department of CSE, P.A. College of Engineering, Mangaluru
@@ -15,7 +15,7 @@ Embed Club, Department of CSE, P.A. College of Engineering, Mangaluru
 
 ## Problem Statement
 
-catil helth taraker
+Paper herd registers make vaccination dates easy to miss and make health claims impossible to verify at a glance. CattleCare gives farmers one offline-friendly workspace for records and care events, and gives buyers and veterinarians a QR-linked passport that shows only safe, explicitly verified data.
 
 ## Timeline
 

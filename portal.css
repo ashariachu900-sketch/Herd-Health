@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+/* Local-only styles: no CDN imports so the portal works offline and under CSP. */
 
 :root {
   --forest: #193e32;
@@ -17,6 +17,8 @@
 }
 
 * { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
 
 .visually-hidden {
   position: absolute;
@@ -548,7 +550,7 @@ button { cursor: pointer; }
   border-bottom: 4px solid var(--gold);
 }
 
-.certificate-title h2 {
+.certificate-title h1 {
   margin: 0;
   font: 800 22px 'Manrope', sans-serif;
   letter-spacing: -.5px;
@@ -690,7 +692,7 @@ button { cursor: pointer; }
   padding: 22px;
 }
 
-.detail-card h3 {
+.detail-card h2 {
   margin: 0 0 16px;
   font: 700 15px 'Manrope', sans-serif;
   color: var(--forest);
@@ -736,7 +738,7 @@ button { cursor: pointer; }
   padding: 22px;
 }
 
-.doctor-notes-box h3 {
+.doctor-notes-box h2 {
   margin: 0 0 10px;
   font: 700 15px 'Manrope', sans-serif;
   color: var(--forest);

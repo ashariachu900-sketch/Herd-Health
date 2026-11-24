@@ -11,6 +11,7 @@ import io
 import sys
 import json
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ import urllib.request
 import urllib.error
 from http.server import ThreadingHTTPServer
 
+import restore
 import server
 
 TEST_TOKEN = "unit-test-token"
@@ -46,7 +48,10 @@ class InProcessTestClient:
 
         req.send_response = mock_send_response
         req.send_header = lambda key, value: req.headers_out.__setitem__(key, value)
-        req.end_headers = lambda: None
+        def mock_end_headers():
+            for key, value in server.CattleRequestHandler.SECURITY_HEADERS:
+                req.send_header(key, value)
+        req.end_headers = mock_end_headers
 
         if method == "GET":
             req.do_GET()
@@ -366,11 +371,13 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertIn("X-Vet-Token", body["error"])
         self.client.request("DELETE", f"/api/animals/{aid}")
 
-    def test_19_client_backup_sends_admin_token(self):
+    def test_19_client_backup_uses_session_not_js_token(self):
         src_path = os.path.join(server.STATIC_DIR, "script.js")
         with open(src_path, "r", encoding="utf-8") as handle:
             src = handle.read()
-        self.assertIn('headers: { "X-Admin-Token": getAdminToken() }', src)
+        self.assertIn('headers: authHeaders()', src)
+        self.assertNotIn("X-Admin-Token", src)
+        self.assertNotIn("sessionStorage", src)
         self.assertNotIn('fetch(`${API_BASE}/api/export`)', src)
 
     def test_20_pagination_and_summary(self):
@@ -604,6 +611,203 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertFalse(visible[0]["hasPhoto"])
 
         self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    # --------------------------------------------------------------------------
+    # 6. Hardening regressions
+    # --------------------------------------------------------------------------
+
+    def test_36_unauthenticated_reads_are_public_safe(self):
+        photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "SafeProbe", "tag": "SAFE-1", "notes": "hidden-clinical-note", "photo": photo}
+        )
+        self.assertEqual(status, 201)
+
+        anonymous = {"X-Admin-Token": ""}
+        status, rows = self.client.request("GET", "/api/animals", headers=anonymous)
+        self.assertEqual(status, 200)
+        row = next(r for r in rows if r["id"] == created["id"])
+        self.assertNotIn("notes", row)
+        self.assertNotIn("photo", row)
+        self.assertFalse(row["hasPhoto"])
+
+        status, one = self.client.request(
+            "GET", f"/api/animals/{created['tag']}", headers=anonymous
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("notes", one)
+        self.assertNotIn("photo", one)
+        self.assertIn("careHighlights", one)
+
+        status, leaks = self.client.request(
+            "GET", "/api/animals?search=hidden-clinical-note", headers=anonymous
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(any(r["id"] == created["id"] for r in leaks))
+
+        status, private = self.client.request("GET", "/api/animals?private=true", headers=anonymous)
+        self.assertEqual(status, 401)
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_37_export_and_restore_include_children_and_photos(self):
+        photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "BackupProbe", "tag": "BACKUP-1", "notes": "keep-me", "photo": photo}
+        )
+        self.assertEqual(status, 201)
+        self.client.request(
+            "POST", f"/api/animals/{created['id']}/events",
+            {"type": "treatment", "title": "Dose given", "occurredAt": "2026-01-01"}
+        )
+        self.client.request(
+            "POST", f"/api/animals/{created['id']}/verify", {"verifiedBy": "Dr Rao"},
+            headers={"X-Vet-Token": TEST_VET_TOKEN}
+        )
+
+        status, payload = self.client.request("GET", "/api/export")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(payload["schemaVersion"], 3)
+        self.assertTrue(any(e["title"] == "Dose given" for e in payload["careEvents"]))
+        self.assertTrue(any(v["verifiedBy"] == "Dr Rao" for v in payload["verificationLog"]))
+        self.assertTrue(any(a["action"] == "verify" for a in payload["auditLog"]))
+        self.assertTrue(any(p["path"] == created["photo"] for p in payload["photos"]))
+
+        restore_dir = tempfile.mkdtemp(prefix="cattlecare_restore_")
+        try:
+            db_path = os.path.join(restore_dir, "restored.db")
+            uploads = os.path.join(restore_dir, "uploads")
+            counts = restore.restore_backup(payload, db_path, uploads)
+            self.assertEqual(counts["animals"], payload["totalRecords"])
+            self.assertGreaterEqual(counts["care_events"], 1)
+            self.assertGreaterEqual(counts["photos"], 1)
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            restored = conn.execute(
+                "SELECT notes, photo FROM animals WHERE id = ?", (created["id"],)
+            ).fetchone()
+            self.assertEqual(restored["notes"], "keep-me")
+            self.assertTrue(os.path.isfile(os.path.join(uploads, os.path.basename(restored["photo"]))))
+            self.assertGreaterEqual(conn.execute("SELECT COUNT(*) FROM care_events").fetchone()[0], 1)
+            conn.close()
+        finally:
+            shutil.rmtree(restore_dir, ignore_errors=True)
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_38_identical_tokens_are_rejected_at_startup(self):
+        env = os.environ.copy()
+        env["FARM_ADMIN_TOKEN"] = "same-token"
+        env["FARM_VET_TOKEN"] = "same-token"
+        probe = "import server; server.run_server(port=0)"
+        result = subprocess.run(
+            [sys.executable, "-c", probe], env=env, capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be different", result.stderr)
+
+    def test_39_cookie_sessions_are_csrf_protected_and_auditable(self):
+        status, login = self.client.request(
+            "POST", "/api/session",
+            {"token": TEST_TOKEN, "operator": "Nurse A"},
+            headers={"X-Admin-Token": ""}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(login["actor"], "Nurse A")
+        self.assertIn("HttpOnly", self.client.headers_out["Set-Cookie"])
+        self.assertIn("SameSite=Strict", self.client.headers_out["Set-Cookie"])
+        cookie = self.client.headers_out["Set-Cookie"].split(";")[0]
+        csrf = login["csrfToken"]
+
+        safe_headers = {"X-Admin-Token": "", "Cookie": cookie}
+        status, body = self.client.request(
+            "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
+            headers=safe_headers
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("X-CSRF-Token", body["error"])
+
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
+            headers={**safe_headers, "X-CSRF-Token": csrf}
+        )
+        self.assertEqual(status, 201)
+        conn = server.get_db()
+        actor = conn.execute(
+            "SELECT actor FROM audit_log WHERE action = 'create' AND entityId = ?",
+            (created["id"],)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(actor, "Nurse A")
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_40_delete_removes_child_rows_but_keeps_audit(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "ChildProbe", "tag": "CHILD-1"}
+        )
+        self.assertEqual(status, 201)
+        aid = created["id"]
+        self.client.request("POST", f"/api/animals/{aid}/events", {
+            "type": "observation", "title": "Seen grazing", "occurredAt": "2026-01-01"
+        })
+        self.client.request("POST", f"/api/animals/{aid}/verify", {"verifiedBy": "Dr Rao"},
+                            headers={"X-Vet-Token": TEST_VET_TOKEN})
+        conn = server.get_db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM care_events WHERE animalId = ?", (aid,)).fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM verification_log WHERE animalId = ?", (aid,)).fetchone()[0], 1)
+        conn.close()
+
+        self.assertEqual(self.client.request("DELETE", f"/api/animals/{aid}")[0], 200)
+        conn = server.get_db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM care_events WHERE animalId = ?", (aid,)).fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM verification_log WHERE animalId = ?", (aid,)).fetchone()[0], 0)
+        self.assertGreaterEqual(conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'delete' AND entityId = ?", (aid,)
+        ).fetchone()[0], 1)
+        conn.close()
+
+    def test_41_audit_log_is_append_only(self):
+        conn = server.get_db()
+        audit_id = conn.execute(
+            "SELECT id FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("UPDATE audit_log SET summary = 'tampered' WHERE id = ?", (audit_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM audit_log WHERE id = ?", (audit_id,))
+        conn.close()
+
+    def test_42_shared_links_are_public_safe_by_default(self):
+        with open(os.path.join(server.STATIC_DIR, "script.js"), encoding="utf-8") as handle:
+            script = handle.read()
+        with open(os.path.join(server.STATIC_DIR, "portal.html"), encoding="utf-8") as handle:
+            portal = handle.read()
+        with open(os.path.join(server.STATIC_DIR, "portal.js"), encoding="utf-8") as handle:
+            portal_js = handle.read()
+        self.assertIn("&public=1", script)
+        self.assertIn('id="publicMode" checked disabled', portal)
+        self.assertIn('id="doctorNotesBox"', portal)
+        self.assertIn('params.set("public", "true")', portal_js)
+
+    def test_43_deployment_config_hardened(self):
+        static = server.STATIC_DIR
+        with open(os.path.join(static, "Dockerfile"), encoding="utf-8") as handle:
+            dockerfile = handle.read()
+        with open(os.path.join(static, "docker-compose.yml"), encoding="utf-8") as handle:
+            compose = handle.read()
+        with open(os.path.join(static, "Caddyfile"), encoding="utf-8") as handle:
+            caddy = handle.read()
+        with open(os.path.join(static, ".github", "workflows", "tests.yml"), encoding="utf-8") as handle:
+            workflow = handle.read()
+        self.assertIn("USER app", dockerfile)
+        self.assertIn("no-new-privileges:true", compose)
+        self.assertIn("cap_drop:", compose)
+        self.assertIn("Content-Security-Policy", caddy)
+        self.assertIn("node --check script.js", workflow)
+        self.assertIn("node --check portal.js", workflow)
+        self.assertIn("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", workflow)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
