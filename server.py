@@ -5,13 +5,18 @@ powered by Python's standard library (ThreadingHTTPServer + sqlite3 in WAL mode)
 
 Endpoints:
   GET    /api/health              - Liveness check
-  GET    /api/animals             - List; ?search=, ?tag=, ?health=, ?summary=true, ?limit=, ?offset=
+  GET    /api/animals             - List; ?search=, ?tag=, ?health=, ?summary=true, ?public=true, ?limit=, ?offset=
   GET    /api/animals/<id>        - Get one record by ID or tag (includes photo path)
   POST   /api/animals             - Create (admin token; server-generated id/createdAt)
   PUT    /api/animals/<id>        - Update (admin token; photo/verification preserved when omitted)
   DELETE /api/animals/<id>        - Delete (admin token)
   POST   /api/animals/<id>/verify - Vet verification (vet token; writes audit log)
   GET    /api/stats               - Dashboard aggregates
+  GET    /api/analytics           - Safe herd analytics for insights
+  GET    /api/audit               - Append-only action log (admin token)
+  GET    /api/passport/<id-or-tag>- Public-safe passport (no notes or photos)
+  GET    /api/animals/<id>/events - Care timeline (admin token)
+  POST   /api/animals/<id>/events - Add care event (admin token)
   GET    /api/export              - Full JSON backup (admin token)
   GET    /uploads/<file>          - Uploaded animal photos
   Static files                   - index.html, portal.html, CSS, JS
@@ -176,6 +181,35 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_verification_animal ON verification_log (animalId);")
 
+    # Schema version 2 adds a care timeline and one append-only action log.
+    # PRAGMA user_version survives restarts and lets future upgrades migrate safely.
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS care_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                animalId TEXT NOT NULL,
+                type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details TEXT,
+                occurredAt TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                actor TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_animal ON care_events (animalId, occurredAt DESC);")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                entityId TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                createdAt TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (createdAt DESC);")
+        conn.execute("PRAGMA user_version = 2")
+
     # Performance indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_created ON animals (createdAt DESC);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_animals_health ON animals (health);")
@@ -258,6 +292,15 @@ def row_to_dict(row):
         "verifiedBy": (row["verifiedBy"] or "") if "verifiedBy" in row.keys() else "",
         "verifiedAt": (row["verifiedAt"] or "") if "verifiedAt" in row.keys() else ""
     }
+
+EVENT_TYPES = ("vaccination", "treatment", "health_check", "observation", "movement")
+
+def write_audit(conn, action, entity_id, summary, actor="farmer"):
+    """Append a mutation to the audit log in the caller's transaction."""
+    conn.execute("""
+        INSERT INTO audit_log (action, entityId, summary, actor, createdAt)
+        VALUES (?, ?, ?, ?, ?)
+    """, (action, str(entity_id), str(summary)[:200], str(actor), datetime.datetime.now().isoformat()))
 
 def valid_iso_date(value):
     if not value:
@@ -497,6 +540,110 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             self.send_json(200, payload)
             return
 
+        if path == "/api/analytics":
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("SELECT health, COUNT(*) AS n FROM animals GROUP BY health")
+            health = {(r["health"] or "Unknown"): r["n"] for r in cursor.fetchall()}
+            cursor.execute("""
+                SELECT CASE
+                         WHEN nextVaccineDate IS NULL OR nextVaccineDate = '' THEN 'none'
+                         WHEN date(nextVaccineDate) <= date('now') THEN 'due'
+                         ELSE 'upcoming'
+                       END AS bucket,
+                       COUNT(*) AS n
+                FROM animals GROUP BY bucket
+            """)
+            vaccines = {r["bucket"]: r["n"] for r in cursor.fetchall()}
+            cursor.execute("""
+                SELECT breed, COUNT(*) AS n FROM animals
+                WHERE breed IS NOT NULL AND breed != ''
+                GROUP BY breed ORDER BY n DESC, breed ASC LIMIT 5
+            """)
+            breeds = [{"breed": r["breed"], "count": r["n"]} for r in cursor.fetchall()]
+            cursor.execute("""
+                SELECT SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS verified, COUNT(*) AS total
+                FROM animals
+            """)
+            verify = cursor.fetchone()
+            cursor.execute("SELECT type, COUNT(*) AS n FROM care_events GROUP BY type")
+            events = {r["type"]: r["n"] for r in cursor.fetchall()}
+            conn.close()
+            self.send_json(200, {
+                "health": health,
+                "vaccines": vaccines,
+                "topBreeds": breeds,
+                "verifiedCount": verify["verified"] or 0,
+                "total": verify["total"] or 0,
+                "eventTypes": events
+            })
+            return
+
+        if path == "/api/audit":
+            if not self.check_auth():
+                return
+            conn = get_db()
+            rows = conn.execute(
+                "SELECT * FROM audit_log ORDER BY createdAt DESC, id DESC LIMIT 100"
+            ).fetchall()
+            conn.close()
+            self.send_json(200, [dict(r) for r in rows])
+            return
+
+        if path.startswith("/api/passport/"):
+            animal_id = urllib.parse.unquote(path[len("/api/passport/"):].strip())
+            conn = get_db()
+            row = conn.execute(
+                "SELECT * FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id)
+            ).fetchone()
+            if not row:
+                conn.close()
+                self.send_json(404, {"error": "Animal not found"})
+                return
+            # Deliberately exclude notes and photo: this endpoint is for public links.
+            safe_events = conn.execute("""
+                SELECT type, title, occurredAt FROM care_events
+                WHERE animalId = ? AND type IN ('vaccination', 'health_check')
+                ORDER BY occurredAt DESC LIMIT 5
+            """, (row["id"],)).fetchall()
+            conn.close()
+            self.send_json(200, {
+                "id": row["id"],
+                "name": row["name"],
+                "tag": row["tag"],
+                "breed": row["breed"] or "",
+                "dob": row["dob"] or "",
+                "health": row["health"] or "Healthy",
+                "lastVaccineDate": row["lastVaccineDate"] or "",
+                "vaccineName": row["vaccineName"] or "",
+                "nextVaccineDate": row["nextVaccineDate"] or "",
+                "verified": bool(row["verified"]),
+                "verifiedBy": row["verifiedBy"] or "",
+                "verifiedAt": row["verifiedAt"] or "",
+                "careHighlights": [dict(e) for e in safe_events]
+            })
+            return
+
+        if path.startswith("/api/animals/") and path.endswith("/events"):
+            if not self.check_auth():
+                return
+            animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/events")].strip("/"))
+            conn = get_db()
+            record = conn.execute(
+                "SELECT id FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id)
+            ).fetchone()
+            if not record:
+                conn.close()
+                self.send_json(404, {"error": "Animal not found"})
+                return
+            rows = conn.execute("""
+                SELECT * FROM care_events WHERE animalId = ?
+                ORDER BY occurredAt DESC, id DESC LIMIT 100
+            """, (record["id"],)).fetchall()
+            conn.close()
+            self.send_json(200, [dict(r) for r in rows])
+            return
+
         if path == "/api/animals":
             search = query.get("search", [""])[0].strip().lower()
             tag_filter = query.get("tag", [""])[0].strip().lower()
@@ -504,6 +651,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             # ?summary=true — omit large base64 photo blobs from list responses.
             # Callers that need the full photo should fetch /api/animals/<id>.
             summary_mode = query.get("summary", ["false"])[0].strip().lower() == "true"
+            # ?public=true is enforced server-side: notes/photos never leave the API.
+            public_mode = query.get("public", ["false"])[0].strip().lower() == "true"
             limit_raw = query.get("limit", [""])[0]
             offset_raw = query.get("offset", [""])[0]
             limit = min(max(int(limit_raw), 1), 200) if limit_raw.isdigit() else None
@@ -517,8 +666,17 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if search:
                 escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 like = f"%{escaped}%"
-                clauses.append("(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(tag) LIKE ? ESCAPE '\\' OR LOWER(breed) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(notes, '')) LIKE ? ESCAPE '\\')")
-                params.extend([like, like, like, like])
+                search_columns = ["LOWER(name) LIKE ? ESCAPE '\\'",
+                                  "LOWER(tag) LIKE ? ESCAPE '\\'",
+                                  "LOWER(breed) LIKE ? ESCAPE '\\'"]
+                params.extend([like] * len(search_columns))
+                # Searching notes would leak private text through a public endpoint.
+                if public_mode:
+                    clauses.append("(" + " OR ".join(search_columns) + ")")
+                else:
+                    search_columns.append("LOWER(COALESCE(notes, '')) LIKE ? ESCAPE '\\'")
+                    params.append(like)
+                    clauses.append("(" + " OR ".join(search_columns) + ")")
             if health_filter == "due":
                 clauses.append("date(nextVaccineDate) IS NOT NULL AND date(nextVaccineDate) <= date('now')")
             elif health_filter != "all":
@@ -546,6 +704,10 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 if summary_mode:
                     animal["hasPhoto"] = bool(animal["photo"])
                     animal.pop("photo", None)  # strip photo to cut payload size
+                if public_mode:
+                    animal.pop("notes", None)
+                    animal.pop("photo", None)
+                    animal["hasPhoto"] = False
                 results.append(animal)
 
             self.send_json(200, results, {"X-Total-Count": str(total_count)})
@@ -568,8 +730,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         # Protected static files check (prevent downloading raw database, source code, or configs)
         BLOCKED_FILES = {
             "cattlecare.db", "cattlecare.db-wal", "cattlecare.db-shm",
-            "server.py", "test_server.py", "run_server.bat",
-            ".gitignore", "readme.md"
+            "server.py", "test_server.py", "backup.py", "run_server.bat",
+            "caddyfile", "docker-compose.yml", ".gitignore", "readme.md"
         }
         ALLOWED_STATIC_EXTENSIONS = {
             ".html", ".css", ".js", ".png", ".jpg", ".jpeg",
@@ -596,6 +758,49 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        # Care timeline events: structured history instead of one free-text notes blob.
+        if path.startswith("/api/animals/") and path.endswith("/events"):
+            if not self.check_auth():
+                return
+            animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/events")].strip("/"))
+            data = self.parse_json_body()
+            if data is None or data == "ERROR":
+                return
+            event_type = str(data.get("type") or "").strip()
+            title = str(data.get("title") or "").strip()[:80]
+            details = str(data.get("details") or "").strip()[:500]
+            occurred = str(data.get("occurredAt") or "").strip()
+            if event_type not in EVENT_TYPES:
+                self.send_json(400, {"error": "Invalid event type."})
+                return
+            if not title or not valid_iso_date(occurred):
+                self.send_json(400, {"error": "title and a valid occurredAt date are required."})
+                return
+            conn = get_db()
+            cursor = conn.cursor()
+            record = cursor.execute(
+                "SELECT id FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id)
+            ).fetchone()
+            if not record:
+                conn.close()
+                self.send_json(404, {"error": "Animal not found"})
+                return
+            cursor.execute("""
+                INSERT INTO care_events (animalId, type, title, details, occurredAt, createdAt, actor)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (record["id"], event_type, title, details, occurred,
+                  datetime.datetime.now().isoformat(), "farmer"))
+            write_audit(conn, "event", record["id"], f"{event_type}: {title}")
+            conn.commit()
+            event_id = cursor.lastrowid
+            conn.close()
+            self.send_json(201, {
+                "id": event_id, "animalId": record["id"], "type": event_type,
+                "title": title, "details": details, "occurredAt": occurred,
+                "createdAt": datetime.datetime.now().isoformat(), "actor": "farmer"
+            })
+            return
 
         # Vet verification requires a separate vet token and writes an audit row.
         if path.startswith("/api/animals/") and path.endswith("/verify"):
@@ -624,6 +829,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 INSERT INTO verification_log (animalId, verifiedBy, verifiedAt, actor)
                 VALUES (?, ?, ?, ?)
             """, (animal_id, verified_by, verified_at, "vet-token"))
+            write_audit(conn, "verify", animal_id, f"Vet verification by {verified_by}", "vet-token")
             conn.commit()
             STATS_CACHE.clear()
             cursor.execute("SELECT * FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
@@ -677,6 +883,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
                     fields["nextVaccineDate"], fields["notes"], photo_path, created_at
                 ))
+                write_audit(conn, "create", animal_id, f"Registered {fields['name']} ({fields['tag']})")
                 conn.commit()
                 STATS_CACHE.clear()
             except sqlite3.IntegrityError:
@@ -757,6 +964,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
                 fields["nextVaccineDate"], fields["notes"], photo_to_save, real_id
             ))
+            write_audit(conn, "update", real_id, f"Updated {fields['name']} ({fields['tag']})")
             conn.commit()
             STATS_CACHE.clear()
 
@@ -790,6 +998,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
 
             real_id = animal["id"]
             cursor.execute("DELETE FROM animals WHERE id = ?", (real_id,))
+            write_audit(conn, "delete", real_id, f"Deleted {animal['name']} ({animal['tag']})")
             conn.commit()
             STATS_CACHE.clear()
             conn.close()

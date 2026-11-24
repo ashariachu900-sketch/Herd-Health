@@ -26,6 +26,8 @@
         <button class="nav-link" data-page="cattle"><span>♧</span> My Cattle</button>
         <button class="nav-link" data-page="vaccinations"><span>✚</span> Vaccinations</button>
         <button class="nav-link" data-page="qr"><span>▦</span> QR Station</button>
+        <button class="nav-link" data-page="care"><span>✎</span> Care Log</button>
+        <button class="nav-link" data-page="insights"><span>◔</span> Insights</button>
         <a class="nav-link" href="portal.html" target="_blank" style="text-decoration: none; color: #e6bb63;"><span>🌐</span> Public/Vet Portal ↗</a>
       </nav>
 
@@ -195,6 +197,49 @@
         <div class="qr-grid" id="qrGrid">
           <div class="empty-state">▦ <strong>No QR codes yet</strong><span>Register cattle to create their individual QR codes.</span></div>
         </div>
+      </section>
+
+      <section class="page" id="carePage">
+        <div class="page-heading">
+          <div><span class="eyebrow">STRUCTURED HISTORY, NOT JUST NOTES</span><h1>Care <em>log.</em></h1><p>Record vaccinations, treatments and observations as events you can actually analyse.</p></div>
+        </div>
+
+        <div class="panel care-entry-panel">
+          <div class="panel-heading"><div><span class="eyebrow">ADD AN EVENT</span><h3>What happened?</h3></div></div>
+          <form id="eventForm" class="care-form">
+            <select id="eventAnimal" aria-label="Animal"></select>
+            <select id="eventType" aria-label="Event type">
+              <option value="vaccination">Vaccination</option>
+              <option value="treatment">Treatment</option>
+              <option value="health_check">Health check</option>
+              <option value="observation">Observation</option>
+              <option value="movement">Movement</option>
+            </select>
+            <input id="eventTitle" maxlength="80" placeholder="Short title, e.g. Annual FMD booster" required>
+            <input id="eventDate" type="date" required>
+            <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..."></textarea>
+            <button type="submit" class="primary-button" id="saveEventBtn">＋ Add event</button>
+          </form>
+          <p class="form-message" id="eventMessage" role="status"></p>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-heading"><div><span class="eyebrow">PER ANIMAL</span><h3>Care timeline</h3></div></div>
+            <div id="eventTimeline" class="event-timeline"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><span class="eyebrow">ACCOUNTABILITY</span><h3>Audit trail</h3></div></div>
+            <div id="auditList" class="audit-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="insightsPage">
+        <div class="page-heading">
+          <div><span class="eyebrow">DECISIONS, NOT DECORATION</span><h1>Herd <em>insights.</em></h1><p>SQL-backed summaries that stay correct while the herd grows.</p></div>
+        </div>
+        <div class="insight-grid" id="insightGrid"></div>
       </section>
 
       <footer class="app-footer">

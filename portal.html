@@ -75,6 +75,9 @@
           <button class="filter-pill" data-filter="vaccine_due" aria-pressed="false">Vaccines Due / Overdue</button>
         </div>
         <span class="results-summary" id="resultsCount">Loading herd directory...</span>
+        <label class="public-mode-toggle" title="Hide clinical notes and photos in passports">
+          <input type="checkbox" id="publicMode"> Public-safe view
+        </label>
       </div>
 
       <div id="missingRecord" class="missing-record" role="status" hidden></div>
@@ -190,6 +193,8 @@
             </div>
           </div>
         </div>
+
+        <div class="care-highlights" id="careHighlights"></div>
 
         <div class="certificate-footer">
           <span>Certificate generated from CattleCare Farm System</span>

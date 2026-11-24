@@ -49,12 +49,20 @@ function clearAdminToken() {
   }
 }
 
+/** Check silently: page loaders must not prompt before the user tries a write. */
+function hasAdminToken() {
+  return Boolean(sessionStorage.getItem("farm_admin_token") || ($("adminTokenInput")?.value || "").trim());
+}
+
 const PAGE_SIZE = 50;
 let animals = [];
 let isBackendConnected = false;
 let currentPage = 0;
 let totalCount = 0;
 let dashboardStats = null;
+let analytics = null;
+let careEvents = [];
+let auditEntries = [];
 let toastTimer;
 
 const $ = (id) => document.getElementById(id);
@@ -183,6 +191,127 @@ function renderPagination() {
     <span>Page ${currentPage + 1} of ${pages}</span>
     <button type="button" data-page="${currentPage + 1}" ${currentPage >= pages - 1 ? "disabled" : ""} aria-label="Next page">Next →</button>
   `;
+}
+
+// -----------------------------------------------------------------------------
+// Insights, care timeline and audit trail
+// -----------------------------------------------------------------------------
+
+async function loadAnalytics() {
+  try {
+    const res = await fetch(`${API_BASE}/api/analytics`);
+    if (res.ok) analytics = await res.json();
+  } catch {
+    // Keep previous figures when offline.
+  }
+}
+
+function insightBars(mapping) {
+  const entries = Object.entries(mapping || {});
+  if (!entries.length) return `<p class="empty-state">No data yet.</p>`;
+  const max = Math.max(...entries.map(([, value]) => value), 1);
+  return entries.map(([label, value]) => `
+    <div class="insight-row">
+      <span>${escapeHTML(label.replaceAll("_", " "))}</span>
+      <span class="insight-bar"><i style="width:${Math.round(value / max * 100)}%"></i></span>
+      <strong>${value}</strong>
+    </div>
+  `).join("");
+}
+
+function renderInsights() {
+  const grid = $("insightGrid");
+  if (!grid || !analytics) return;
+  const breeds = (analytics.topBreeds || []).map(b => [b.breed, b.count]);
+  grid.innerHTML = `
+    <article class="insight-card"><h3>Health mix</h3>${insightBars(analytics.health)}</article>
+    <article class="insight-card"><h3>Vaccine status</h3>${insightBars(analytics.vaccines)}</article>
+    <article class="insight-card"><h3>Care events recorded</h3>${insightBars(analytics.eventTypes)}</article>
+    <article class="insight-card">
+      <h3>Verification & breeds</h3>
+      <p>${analytics.verifiedCount} of ${analytics.total} records vet-verified.</p>
+      ${breeds.length ? insightBars(Object.fromEntries(breeds)) : "<p>No breed data yet.</p>"}
+    </article>
+  `;
+}
+
+async function loadCareData() {
+  const select = $("eventAnimal");
+  if (!select) return;
+  const previous = select.value;
+  try {
+    const res = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`);
+    const list = res.ok ? await res.json() : animals;
+    select.innerHTML = list.length
+      ? list.map(a => `<option value="${escapeHTML(a.id)}">${escapeHTML(a.tag)} — ${escapeHTML(a.name)}</option>`).join("")
+      : `<option value="">No animals registered</option>`;
+    if (list.some(a => a.id === previous)) select.value = previous;
+  } catch {
+    select.innerHTML = `<option value="">Backend unavailable</option>`;
+  }
+  await loadCareEvents();
+  await loadAudit();
+}
+
+async function loadCareEvents() {
+  const id = $("eventAnimal")?.value;
+  if (!id || !hasAdminToken()) {
+    careEvents = [];
+    renderEvents();
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`, {
+      headers: { "X-Admin-Token": getAdminToken() }
+    });
+    if (res.status === 401) { clearAdminToken(); return; }
+    careEvents = res.ok ? await res.json() : [];
+  } catch {
+    careEvents = [];
+  }
+  renderEvents();
+}
+
+function renderEvents() {
+  const list = $("eventTimeline");
+  if (!list) return;
+  list.innerHTML = careEvents.length ? careEvents.map(event => `
+    <div class="event-item">
+      <strong>${escapeHTML(event.title)}</strong>
+      <small>${escapeHTML(event.type.replaceAll("_", " "))} · ${escapeHTML(event.occurredAt)} · ${escapeHTML(event.actor)}</small>
+      ${event.details ? `<div>${escapeHTML(event.details)}</div>` : ""}
+    </div>
+  `).join("") : `<div class="empty-state">🌱 No care events recorded for this animal.</div>`;
+}
+
+async function loadAudit() {
+  const list = $("auditList");
+  if (!list || !hasAdminToken()) {
+    auditEntries = [];
+    renderAudit();
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/audit`, {
+      headers: { "X-Admin-Token": getAdminToken() }
+    });
+    if (res.status === 401) { clearAdminToken(); return; }
+    auditEntries = res.ok ? await res.json() : [];
+  } catch {
+    auditEntries = [];
+  }
+  renderAudit();
+}
+
+function renderAudit() {
+  const list = $("auditList");
+  if (!list) return;
+  list.innerHTML = auditEntries.length ? auditEntries.slice(0, 30).map(entry => `
+    <div class="audit-item">
+      <strong>${escapeHTML(entry.action)}</strong> — ${escapeHTML(entry.summary)}
+      <small>${escapeHTML(entry.createdAt)} · ${escapeHTML(entry.actor)}</small>
+    </div>
+  `).join("") : `<div class="empty-state">No audited actions yet.</div>`;
 }
 
 // -----------------------------------------------------------------------------
@@ -632,7 +761,9 @@ function showPage(pageName) {
     dashboard: "Overview",
     cattle: "My Cattle",
     vaccinations: "Vaccinations",
-    qr: "QR Station"
+    qr: "QR Station",
+    care: "Care Log",
+    insights: "Insights"
   };
 
   document.querySelectorAll(".page").forEach(page => page.classList.remove("active"));
@@ -648,6 +779,8 @@ function showPage(pageName) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   if (pageName === "qr") renderQrCodes();
+  if (pageName === "care") loadCareData();
+  if (pageName === "insights") { loadAnalytics().then(renderInsights); }
 }
 
 function downloadQr(id) {
@@ -766,6 +899,54 @@ document.addEventListener("click", event => {
   }
 
   if (action === "download-qr") downloadQr(id);
+});
+
+$("eventAnimal")?.addEventListener("change", loadCareEvents);
+$("eventForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const token = getAdminToken();
+  if (!token) return;
+  const animalId = $("eventAnimal").value;
+  const message = $("eventMessage");
+  if (!animalId) {
+    message.textContent = "Register an animal first.";
+    return;
+  }
+  const payload = {
+    type: $("eventType").value,
+    title: $("eventTitle").value.trim(),
+    occurredAt: $("eventDate").value,
+    details: $("eventDetails").value.trim()
+  };
+  if (!payload.title || !payload.occurredAt) {
+    message.textContent = "A title and date are required.";
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animalId)}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+      body: JSON.stringify(payload)
+    });
+    if (res.status === 401) {
+      clearAdminToken();
+      message.textContent = "Wrong admin passcode. Event not saved.";
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      message.textContent = body.error || "Could not save the event.";
+      return;
+    }
+    $("eventTitle").value = "";
+    $("eventDetails").value = "";
+    message.textContent = "Care event added.";
+    await loadCareEvents();
+    await loadAudit();
+    showToast("Care event recorded. ✎");
+  } catch {
+    message.textContent = "Backend unavailable. Event not saved.";
+  }
 });
 
 // Mobile sidebar

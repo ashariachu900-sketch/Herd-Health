@@ -30,11 +30,16 @@ const $ = (id) => document.getElementById(id);
 // -----------------------------------------------------------------------------
 
 async function init() {
+  const urlParams = new URLSearchParams(window.location.search);
+  // Shared public links must open in the safe view, not the full vet view.
+  if (urlParams.get("public") === "1" && $("publicMode")) {
+    $("publicMode").checked = true;
+  }
+
   await syncAnimals();
   setupEventListeners();
 
   // Check if URL specifies an animal ID or Tag (e.g., ?id=... or ?tag=COW-101)
-  const urlParams = new URLSearchParams(window.location.search);
   const animalId = urlParams.get("id");
   const animalTag = urlParams.get("tag");
 
@@ -85,6 +90,7 @@ async function syncAnimals(page = 0) {
     limit: String(PAGE_SIZE),
     offset: String(page * PAGE_SIZE)
   });
+  if ($("publicMode")?.checked) params.set("public", "true");
   const search = ($("searchInput")?.value || "").trim();
   if (search) params.set("search", search);
   const healthParam = {
@@ -126,12 +132,31 @@ async function syncAnimals(page = 0) {
   portalStats = null;
 }
 
+/** The public endpoint is the only source that includes safe care highlights. */
+async function fetchSafePassport(value) {
+  if (!isBackendConnected) return null;
+  try {
+    const res = await fetch(`${API_BASE}/api/passport/${encodeURIComponent(value)}`);
+    if (res.ok) return await res.json();
+  } catch {
+    // Offline: the caller shows the missing-record state.
+  }
+  return null;
+}
+
 /** Direct passport links must work even when the tag is on a later page. */
 async function findAnimal(value, kind) {
+  // In public mode never fall back to local cache: it may contain full records
+  // saved before the checkbox was enabled. Always ask the server for safe fields.
+  if ($("publicMode")?.checked) return fetchSafePassport(value);
+
   const local = animals.find(a => kind === "tag"
     ? (a.tag || "").toLowerCase() === value.toLowerCase()
     : a.id === value);
-  if (local) return local;
+  // A safe list row has no notes; never reuse it as a full vet record.
+  if (local && (Object.prototype.hasOwnProperty.call(local, "notes") || !isBackendConnected)) {
+    return local;
+  }
   if (!isBackendConnected) return null;
   try {
     const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(value)}`);
@@ -314,10 +339,11 @@ function renderDirectory() {
             ${escapeHTML(animal.breed || "Breed not specified")} · Age: ${calculateAge(animal.dob)}
           </div>
           
+          ${$("publicMode")?.checked ? "" : `
           <div class="card-notes-preview">
             <strong>Doctor observations:</strong><br>
             ${escapeHTML(animal.notes || "No clinical observations entered by the farm manager.")}
-          </div>
+          </div>`}
 
           <div style="font-size: 11px; color: #586959; margin-bottom: 12px;">
             <span>Next vaccine: </span><strong>${formatDate(animal.nextVaccineDate)}</strong>
@@ -340,7 +366,12 @@ function renderDirectory() {
 // -----------------------------------------------------------------------------
 
 async function showPassport(animal) {
-  await ensurePhoto(animal);
+  const publicMode = Boolean($("publicMode")?.checked);
+  if (publicMode && !animal?.careHighlights) {
+    animal = (await fetchSafePassport(animal.id)) || animal;
+  } else if (!publicMode) {
+    await ensurePhoto(animal);
+  }
   $("directorySection").style.display = "none";
   $("missingRecord").hidden = true;
   document.body.classList.add("passport-open");
@@ -349,7 +380,8 @@ async function showPassport(animal) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   // Update URL query string without reloading page
-  const newUrl = `${window.location.pathname}?tag=${encodeURIComponent(animal.tag)}`;
+  const publicSuffix = publicMode ? "&public=1" : "";
+  const newUrl = `${window.location.pathname}?tag=${encodeURIComponent(animal.tag)}${publicSuffix}`;
   window.history.pushState({ animalId: animal.id }, "", newUrl);
 
   // Photo
@@ -391,8 +423,19 @@ async function showPassport(animal) {
   $("specNextVaccine").textContent = formatDate(animal.nextVaccineDate);
   $("specVaccineStatus").textContent = vStat.label;
 
-  // Doctor Notes
-  $("specDoctorNotes").textContent = animal.notes || "No clinical observations or doctor notes have been entered for this animal.";
+  // Doctor Notes are hidden in public-safe mode; the server does not return them there.
+  $("specDoctorNotes").textContent = publicMode
+    ? "Hidden in public-safe view."
+    : (animal.notes || "No clinical observations or doctor notes have been entered for this animal.");
+
+  const highlights = $("careHighlights");
+  if (highlights) {
+    const events = animal.careHighlights || [];
+    highlights.innerHTML = `<h3>Recent care highlights</h3>` + (events.length
+      ? `<ul>${events.map(e => `<li>${escapeHTML(e.title)} · ${escapeHTML(e.occurredAt)}</li>`).join("")}</ul>`
+      : `<span>No public care highlights recorded.</span>`);
+    highlights.hidden = Boolean(publicMode && !events.length);
+  }
 
   // Verification status: never claim a record is verified unless a vet set the flag.
   const verified = Number(animal.verified) === 1;
@@ -416,16 +459,30 @@ function openPassportById(id) {
 function setupEventListeners() {
   // Search and filtering run server-side so paging stays correct.
   let reloadTimer;
+  async function refreshDirectory(page = 0) {
+    await syncAnimals(page);
+    renderDirectory();
+    await hydratePhotos();
+  }
   function reloadPage() {
     clearTimeout(reloadTimer);
-    reloadTimer = setTimeout(async () => {
-      await syncAnimals(0);
-      renderDirectory();
-      await hydratePhotos();
-    }, 250);
+    reloadTimer = setTimeout(() => refreshDirectory(0), 250);
   }
   $("searchInput").addEventListener("input", reloadPage);
   $("searchButton").addEventListener("click", reloadPage);
+
+  $("publicMode")?.addEventListener("change", async () => {
+    // Refresh the list first; renderDirectory closes any open passport, then we
+    // reopen the same animal through the newly selected view.
+    const params = new URLSearchParams(window.location.search);
+    const key = params.get("tag") || params.get("id");
+    const kind = params.get("tag") ? "tag" : "id";
+    await refreshDirectory(0);
+    if (key) {
+      const found = await findAnimal(key, kind);
+      if (found) await showPassport(found);
+    }
+  });
 
   $("pagination")?.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-page]");

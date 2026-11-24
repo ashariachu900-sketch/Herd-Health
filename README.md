@@ -48,26 +48,31 @@ Commit and push regularly. Your commit history is how progress is tracked.
 
 ## Project Details
 
-_Fill this in as you build. This is what the judges read first._
-
-**Project title:**
+CattleCare — Herd Management System & Health Passport Portal.
 
 **One-line description:**
+A dependency-free Python/SQLite web app for registering cattle, recording structured care events, printing health passports and verifying vet records via QR links.
 
 **Tech stack:**
+Python 3 standard library (`http.server`, `sqlite3`), vanilla HTML/CSS/JavaScript, SQLite WAL, Docker Compose + Caddy for deployment, unittest for backend tests.
 
 **How to run:**
 
 ```bash
-
+export FARM_ADMIN_TOKEN=choose-a-long-random-string
+export FARM_VET_TOKEN=choose-a-different-long-random-string
+python server.py
 ```
 
+Open `http://localhost:8000/` for the Farmer Workspace and `http://localhost:8000/portal.html` for the Public/Vet Portal. For full deployment, env table, backups and API docs, see [`PROJECT_README.md`](PROJECT_README.md).
+
 **Demo link / screenshots:**
+Local demo at `http://localhost:8000/`. Screenshot placeholders: `docs/screenshots/dashboard.png`, `docs/screenshots/care-log.png`, `docs/screenshots/passport.png`.
 
 ## Submission Checklist
 
 - [ ] Code pushed to `main`
-- [ ] Project Details above completed
+- [x] Project Details above completed
 - [ ] README runs from a fresh clone
 - [ ] Demo ready
 

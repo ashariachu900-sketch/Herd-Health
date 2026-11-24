@@ -300,6 +300,12 @@ button { cursor: pointer; }
 .pagination button:disabled { opacity: .45; cursor: not-allowed; }
 .pagination span { color: var(--muted); font-size: 12px; }
 
+.public-mode-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.public-mode-toggle input { accent-color: #5b8c61; }
+.care-highlights { margin-top: 16px; padding: 14px 16px; border: 1px dashed var(--line); border-radius: 12px; font-size: 12px; }
+.care-highlights h3 { margin: 0 0 8px; font-size: 13px; }
+.care-highlights ul { margin: 0; padding-left: 18px; }
+
 .results-summary {
   font-size: 12px;
   color: var(--muted);

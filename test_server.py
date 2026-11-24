@@ -486,5 +486,124 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertTrue(any(r["id"] == created["id"] for r in rows))
         self.client.request("DELETE", f"/api/animals/{created['id']}")
 
+    def test_29_schema_migration_adds_timeline_and_audit_tables(self):
+        conn = server.get_db()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        conn.close()
+        self.assertGreaterEqual(version, 2)
+        self.assertIn("care_events", tables)
+        self.assertIn("audit_log", tables)
+
+    def test_30_care_event_validation_and_auth(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "EventProbe", "tag": "EVENT-1"}
+        )
+        self.assertEqual(status, 201)
+        base = f"/api/animals/{created['id']}/events"
+
+        status, _ = self.client.request(
+            "POST", base, {"type": "vaccination", "title": "Bad token", "occurredAt": "2026-01-01"},
+            headers={"X-Admin-Token": "wrong-token"}
+        )
+        self.assertEqual(status, 401)
+
+        status, body = self.client.request(
+            "POST", base, {"type": "not-a-type", "title": "Bad type", "occurredAt": "2026-01-01"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("Invalid event type", body["error"])
+
+        status, event = self.client.request(
+            "POST", base, {
+                "type": "vaccination", "title": "Annual booster",
+                "occurredAt": "2026-01-01", "details": "No reaction"
+            }
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(event["title"], "Annual booster")
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_31_care_timeline_lists_events_newest_first(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "TimelineProbe", "tag": "TIME-1"}
+        )
+        self.assertEqual(status, 201)
+        base = f"/api/animals/{created['tag']}/events"
+        self.client.request("POST", base, {
+            "type": "observation", "title": "Older note", "occurredAt": "2025-01-01"
+        })
+        self.client.request("POST", base, {
+            "type": "treatment", "title": "Newer treatment", "occurredAt": "2026-01-01"
+        })
+        status, events = self.client.request("GET", base)
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(events[0]["title"], "Newer treatment")
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_32_audit_log_records_create_and_delete(self):
+        status, before = self.client.request("GET", "/api/audit")
+        self.assertEqual(status, 200)
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "AuditProbe", "tag": "AUDIT-1"}
+        )
+        self.assertEqual(status, 201)
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+        status, after = self.client.request("GET", "/api/audit")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(after), len(before) + 2)
+        actions = [entry["action"] for entry in after[:2]]
+        self.assertIn("create", actions)
+        self.assertIn("delete", actions)
+
+    def test_33_public_passport_omits_notes_and_photo(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "PublicProbe", "tag": "PUBLIC-1", "notes": "secret-note"}
+        )
+        self.assertEqual(status, 201)
+        status, passport = self.client.request("GET", "/api/passport/PUBLIC-1")
+        self.assertEqual(status, 200)
+        self.assertNotIn("notes", passport)
+        self.assertNotIn("photo", passport)
+        self.assertEqual(passport["tag"], "PUBLIC-1")
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_34_analytics_returns_only_aggregates(self):
+        status, payload = self.client.request("GET", "/api/analytics")
+        self.assertEqual(status, 200)
+        for key in ("health", "vaccines", "topBreeds", "verifiedCount", "eventTypes"):
+            self.assertIn(key, payload)
+        self.assertNotIn("animals", payload)
+        self.assertNotIn("notes", payload)
+
+    def test_35_public_list_hides_notes_and_does_not_search_them(self):
+        status, created = self.client.request(
+            "POST", "/api/animals", {
+                "name": "PublicListProbe", "tag": "PUBLICLIST-1",
+                "notes": "secret-note-for-public-test"
+            }
+        )
+        self.assertEqual(status, 201)
+
+        status, leaks = self.client.request(
+            "GET", "/api/animals?public=true&search=secret-note-for-public-test"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(leaks, [])
+
+        status, visible = self.client.request(
+            "GET", "/api/animals?public=true&search=PublicListProbe"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(visible), 1)
+        self.assertNotIn("notes", visible[0])
+        self.assertNotIn("photo", visible[0])
+        self.assertFalse(visible[0]["hasPhoto"])
+
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

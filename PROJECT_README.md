@@ -17,7 +17,7 @@ catil helth/
 ├── portal.css          Portal styles and print stylesheet
 ├── portal.js           Portal search, filters, passport renderer (paged API reads)
 ├── server.py           REST API + static file server
-├── test_server.py      28 automated tests (unittest, no dependencies)
+├── test_server.py      35 automated tests (unittest, no dependencies)
 ├── test_frontend.html  Browser DOM test for the backup button
 ├── backup.py           Scheduled backup client using /api/export
 ├── Caddyfile           TLS reverse proxy configuration
@@ -74,11 +74,15 @@ New databases start empty. If you want the three sample cows for a demo, set `SE
 - Write clinical notes and see overdue/upcoming care on the dashboard.
 - Generate and download a QR code per animal (vendored `vendor/qrcode.min.js`, no CDN).
 - Page through the herd 50 records at a time; search and health filters run server-side.
+- **Care Log:** record vaccination, treatment, health check, observation and movement events against an animal instead of burying them in free text.
+- **Audit trail:** create/update/delete/verify/event actions are appended to `audit_log` and shown in the Care Log page.
+- **Insights:** SQL-backed health mix, vaccine status, event counts, verified count and top breeds.
 - Export a JSON backup (admin token required).
 
 ### Public/Vet Portal (`portal.html`)
-- Search by tag ID, name or breed; filter by health or vaccine-due status, paged 50 at a time.
+- Search by tag ID, name, breed or notes; filter by health or vaccine-due status, paged 50 at a time.
 - Printable animal passport with age, vaccination countdown and clinical notes.
+- **Public-safe view:** a checkbox switches list and passport requests to server-enforced safe endpoints (`/api/animals?public=true` and `/api/passport/<id>`) that omit notes/photos and exclude notes from search. Shared links carry `&public=1`.
 - Direct passport links work for animals on any page.
 - **Verification is explicit:** the certificate says "Vet Verified Record" only when a vet-token holder has called the verify endpoint. Otherwise it clearly says "Farmer entry — not vet-verified". Every verification writes an audit row.
 
@@ -93,13 +97,18 @@ All responses are JSON. Writes and exports require the `X-Admin-Token` header (o
 | Method | Endpoint | Auth | Purpose |
 |--------|----------|------|---------|
 | GET | `/api/health` | No | Liveness check |
-| GET | `/api/animals` | No | List; `?search=`, `?tag=`, `?health=`, `?summary=true`, `?limit=` (1–200), `?offset=`; total in `X-Total-Count` |
+| GET | `/api/animals` | No | List; `?search=`, `?tag=`, `?health=`, `?summary=true`, `?public=true` (server strips notes/photos and excludes notes from search), `?limit=` (1–200), `?offset=`; total in `X-Total-Count` |
 | GET | `/api/animals/<id-or-tag>` | No | Single record, including photo path |
 | POST | `/api/animals` | Admin | Create; validates fields, generates id/timestamp server-side |
 | PUT | `/api/animals/<id>` | Admin | Update; preserves photo and verification when omitted |
 | DELETE | `/api/animals/<id>` | Admin | Delete record and its uploaded photo |
 | POST | `/api/animals/<id>/verify` | **Vet** | Set `verified`, `verifiedBy`, `verifiedAt` and write audit log |
 | GET | `/api/stats` | No | Dashboard aggregates from SQL, cached 2s and invalidated on writes |
+| GET | `/api/analytics` | No | Safe aggregate metrics for Insights; no notes or full records |
+| GET | `/api/audit` | Admin | Last 100 audited actions |
+| GET | `/api/passport/<id-or-tag>` | No | Public-safe passport; excludes notes and photos |
+| GET | `/api/animals/<id>/events` | Admin | Care timeline for an animal |
+| POST | `/api/animals/<id>/events` | Admin | Add a validated care event |
 | GET | `/api/export` | Admin | Full JSON backup |
 | GET | `/uploads/<file>` | No | Uploaded photos |
 
@@ -167,7 +176,7 @@ If you must run without Docker, set the two tokens plus `BIND_HOST=0.0.0.0`, ter
 
 ### Database migration
 
-`ensure_columns()` adds `verified`, `verifiedBy` and `verifiedAt` to an older `animals` table and creates `verification_log` on startup. Take a file backup before upgrading, and verify a test record after the first start. There is no separate migration tool or schema-version table; rollback means restoring the previous database file.
+`ensure_columns()` adds `verified`, `verifiedBy` and `verifiedAt` to an older `animals` table. `init_db()` then uses `PRAGMA user_version`: version 2 creates `care_events`, `audit_log` and their indexes on first start. Take a file backup before upgrading, verify a test record and one care event after the first start. Rollback means restoring the previous database file; the app never downgrades `user_version`.
 
 ---
 
@@ -195,7 +204,7 @@ A local backup directory is **not** disaster recovery. Copy the JSON files (and 
 ```bat
 python -m unittest test_server.py -v
 ```
-28 tests cover date logic, schema/indexes/migration, list/search/filter endpoints (including notes), server-side paging totals, SQL-backed stats with cache invalidation, full CRUD with file-backed photos and cleanup, backup auth and client contract, payload limits, blocked files, invalid auth and per-IP throttling, unsafe photo rejection, input validation, vet-only verification with audit logging, admin-token rejection on `/verify`, absence of wildcard CORS, real socket behaviour, demo-data opt-in, and env-configured paths.
+35 tests cover date logic, schema/indexes/migration, list/search/filter endpoints (including notes), server-side paging totals, SQL-backed stats with cache invalidation, full CRUD with file-backed photos and cleanup, backup auth and client contract, payload limits, blocked files, invalid auth and per-IP throttling, unsafe photo rejection, input validation, vet-only verification with audit logging, admin-token rejection on `/verify`, absence of wildcard CORS, real socket behaviour, demo-data opt-in, env-configured paths, care-event validation and ordering, audit logging, public-safe list/passport field exclusion and note-search suppression, and aggregate-only analytics.
 
 CI (`.github/workflows/tests.yml`) runs the tests, compiles the Python entrypoints and validates `docker compose config` on every push/PR.
 
@@ -205,9 +214,9 @@ python -m http.server 8765
 ```
 Open http://localhost:8765/test_frontend.html and confirm the page says **PASS**. It checks that clicking Export sends `X-Admin-Token`, downloads a correctly named JSON file, contains the export payload, and refuses to fake a backup while offline. Node/jsdom is not required.
 
-Additional frontend smoke checks: open both pages at a width of 1280px and 390px, create 51 records (or call the API) to confirm Previous/Next controls, verify a paged passport deep link, print one passport, and confirm QR codes render with the network offline after a first load.
+Additional frontend smoke checks: open both pages at 1280px and 390px, create 51 records to confirm Previous/Next controls, verify a paged passport deep link, print one passport, add a care event and confirm it appears in the timeline and audit trail, open Insights and confirm the bars render, toggle Public-safe view and confirm notes disappear, and confirm QR codes render with the network offline after a first load.
 
-Screenshot placeholder: add `docs/screenshots/dashboard.png` and `docs/screenshots/passport.png` when you have a representative deployment; they are intentionally not committed here.
+Screenshot placeholders: add `docs/screenshots/dashboard.png`, `docs/screenshots/care-log.png` and `docs/screenshots/passport.png` when you have a representative deployment; they are intentionally not committed here.
 
 ---
 

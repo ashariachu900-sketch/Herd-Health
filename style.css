@@ -311,6 +311,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .toolbar select { min-width: 170px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); color: #5e705f; font-size: 12px; }
 .result-count { margin: 0 0 13px; color: var(--muted); font-size: 12px; }
 
+.care-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.care-form input, .care-form select, .care-form textarea { min-height: 38px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--text); font-size: 12px; }
+.care-form textarea { grid-column: 1 / -1; resize: vertical; }
+.care-entry-panel { margin-bottom: 18px; }
+.event-timeline, .audit-list { display: grid; gap: 10px; max-height: 420px; overflow-y: auto; }
+.event-item, .audit-item { border-left: 3px solid var(--green, #5b8c61); background: var(--paper); border-radius: 9px; padding: 10px 12px; font-size: 12px; }
+.event-item small, .audit-item small { display: block; color: var(--muted); margin-top: 4px; }
+.insight-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.insight-card { border: 1px solid var(--line); border-radius: 14px; padding: 18px; background: var(--paper); }
+.insight-card h3 { margin: 0 0 14px; font-size: 15px; }
+.insight-row { display: grid; grid-template-columns: 120px 1fr 34px; align-items: center; gap: 10px; margin: 9px 0; font-size: 12px; }
+.insight-bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.insight-bar i { display: block; height: 100%; border-radius: 999px; background: #5b8c61; }
+
 .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 22px 0 6px; }
 .pagination button { min-height: 34px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--text); font-size: 12px; cursor: pointer; }
 .pagination button:disabled { opacity: .45; cursor: not-allowed; }
