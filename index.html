@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#173f32">
   <title>CattleCare | Sustainable Farm Management</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="vendor/qrcode.min.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -169,6 +169,7 @@
         <div class="cattle-grid" id="cattleGrid">
           <div class="empty-state">🌿 <strong>No cattle registered yet</strong><span>Start building your herd by registering an animal.</span></div>
         </div>
+        <nav class="pagination" id="pagination" aria-label="Herd pages"></nav>
       </section>
 
       <section class="page" id="vaccinationsPage">

@@ -1,0 +1,21 @@
+# Set CADDY_DOMAIN in .env to your real DNS name before going live.
+# Caddy obtains and renews a TLS certificate automatically.
+{$CADDY_DOMAIN:localhost} {
+    encode gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+    }
+
+    # The app throttles failed tokens per IP (5 per 5 minutes). If you want a
+    # second layer at the proxy, add the caddy-ratelimit plugin to the image.
+    reverse_proxy app:8000
+
+    log {
+        output stdout
+    }
+}

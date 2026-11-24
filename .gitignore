@@ -29,3 +29,7 @@ desktop.ini
 
 # Environment variables
 .env
+
+# Local backups and logs produced by deployment tooling
+backups/
+logs/

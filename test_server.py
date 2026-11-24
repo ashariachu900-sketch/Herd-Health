@@ -8,8 +8,10 @@ Execute via:
 
 import os
 import io
+import sys
 import json
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -91,6 +93,11 @@ class CattleCareBackendTests(unittest.TestCase):
         else:
             os.environ["SEED_DEMO_DATA"] = cls.original_seed
         shutil.rmtree(cls.test_dir, ignore_errors=True)
+
+    def setUp(self):
+        # Throttling and the stats cache are process-wide; isolate them per test.
+        server.FAILED_ATTEMPTS.clear()
+        server.STATS_CACHE.clear()
 
     # --------------------------------------------------------------------------
     # 1. Logic & Calculation Tests
@@ -376,6 +383,108 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(second), 1)
         self.assertNotEqual(first[0]["id"], second[0]["id"])
+
+    def test_21_failed_tokens_are_throttled_then_cleared(self):
+        for _ in range(server.MAX_FAILED_ATTEMPTS):
+            status, _ = self.client.request(
+                "GET", "/api/export", headers={"X-Admin-Token": "wrong-token"}
+            )
+            self.assertEqual(status, 401)
+        status, body = self.client.request(
+            "GET", "/api/export", headers={"X-Admin-Token": "wrong-token"}
+        )
+        self.assertEqual(status, 429)
+        self.assertIn("Too many failed attempts", body["error"])
+
+        status, _ = self.client.request("GET", "/api/export")
+        self.assertEqual(status, 200)
+        status, _ = self.client.request(
+            "GET", "/api/export", headers={"X-Admin-Token": "wrong-token"}
+        )
+        self.assertEqual(status, 401)  # success reset the counter
+
+    def test_22_stats_use_aggregates_and_invalidate_on_write(self):
+        status, before = self.client.request("GET", "/api/stats")
+        self.assertEqual(status, 200)
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "StatsProbe", "tag": "STATS-1"}
+        )
+        self.assertEqual(status, 201)
+        status, after = self.client.request("GET", "/api/stats")
+        self.assertEqual(after["totalCattle"], before["totalCattle"] + 1)
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_23_delete_removes_uploaded_photo_file(self):
+        photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "PhotoProbe", "tag": "PHOTO-1", "photo": photo}
+        )
+        self.assertEqual(status, 201)
+        path = os.path.join(server.UPLOAD_DIR, os.path.basename(created["photo"]))
+        self.assertTrue(os.path.isfile(path))
+        status, _ = self.client.request("DELETE", f"/api/animals/{created['id']}")
+        self.assertEqual(status, 200)
+        self.assertFalse(os.path.exists(path))
+
+    def test_24_list_exposes_total_count_and_security_header(self):
+        status, body = self.client.request("GET", "/api/animals?summary=true&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body), 1)
+        self.assertGreaterEqual(int(self.client.headers_out["X-Total-Count"]), 3)
+        self.assertEqual(self.client.headers_out["X-Content-Type-Options"], "nosniff")
+
+    def test_25_due_filter_is_server_side(self):
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "DueProbe", "tag": "DUE-1", "nextVaccineDate": yesterday}
+        )
+        self.assertEqual(status, 201)
+        status, rows = self.client.request("GET", "/api/animals?health=due")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(r["id"] == created["id"] for r in rows))
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_26_environment_overrides_are_applied_on_import(self):
+        env = os.environ.copy()
+        env.update({
+            "BIND_HOST": "0.0.0.0",
+            "CATTLECARE_DB": os.path.join(self.test_dir, "env", "env.db"),
+            "CATTLECARE_UPLOADS": os.path.join(self.test_dir, "env", "photos"),
+        })
+        probe = (
+            "import json, server; print(json.dumps({"
+            "'host': server.BIND_HOST, 'db': server.DB_PATH, 'uploads': server.UPLOAD_DIR}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True
+        )
+        settings = json.loads(result.stdout.strip())
+        self.assertEqual(settings["host"], "0.0.0.0")
+        self.assertEqual(settings["db"], env["CATTLECARE_DB"])
+        self.assertEqual(settings["uploads"], env["CATTLECARE_UPLOADS"])
+
+    def test_27_init_db_creates_missing_parent_directory(self):
+        original_path = server.DB_PATH
+        nested_dir = os.path.join(self.test_dir, "nested", "deeper")
+        try:
+            server.DB_PATH = os.path.join(nested_dir, "fresh.db")
+            server.init_db()
+            self.assertTrue(os.path.isdir(nested_dir))
+            self.assertTrue(os.path.isfile(server.DB_PATH))
+        finally:
+            server.DB_PATH = original_path
+
+    def test_28_search_matches_clinical_notes(self):
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "NoteProbe", "tag": "NOTE-1", "notes": "unique-note-probe"}
+        )
+        self.assertEqual(status, 201)
+        status, rows = self.client.request("GET", "/api/animals?search=unique-note-probe")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(r["id"] == created["id"] for r in rows))
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

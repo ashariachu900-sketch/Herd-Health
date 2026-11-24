@@ -14,9 +14,13 @@ const MS_PER_DAY = 86_400_000;
 /** Only allow small data-URI images to be injected into an <img src>. */
 const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
+const PAGE_SIZE = 50;
 let animals = [];
 let isBackendConnected = false;
 let currentFilter = "all";
+let currentPage = 0;
+let totalCount = 0;
+let portalStats = null;
 let toastTimer;
 
 const $ = (id) => document.getElementById(id);
@@ -35,7 +39,7 @@ async function init() {
   const animalTag = urlParams.get("tag");
 
   if (animalTag) {
-    const found = animals.find(a => (a.tag || "").toLowerCase() === animalTag.toLowerCase());
+    const found = await findAnimal(animalTag, "tag");
     if (found) {
       await showPassport(found);
       return;
@@ -43,7 +47,7 @@ async function init() {
     showMissingRecord(animalTag);
     return;
   } else if (animalId) {
-    const found = animals.find(a => a.id === animalId);
+    const found = await findAnimal(animalId, "id");
     if (found) {
       await showPassport(found);
       return;
@@ -64,22 +68,44 @@ function showMissingRecord(key) {
   notice.hidden = false;
 }
 
-async function syncAnimals() {
+async function loadPortalStats() {
+  try {
+    const res = await fetch(`${API_BASE}/api/stats`);
+    if (res.ok) portalStats = await res.json();
+  } catch {
+    // Keep the last known totals while offline.
+  }
+}
+
+async function syncAnimals(page = 0) {
   const dot = $("portalStatusDot");
   const label = $("portalStatusLabel");
+  const params = new URLSearchParams({
+    summary: "true",
+    limit: String(PAGE_SIZE),
+    offset: String(page * PAGE_SIZE)
+  });
+  const search = ($("searchInput")?.value || "").trim();
+  if (search) params.set("search", search);
+  const healthParam = {
+    all: "all", healthy: "Healthy", attention: "Needs attention", vaccine_due: "due"
+  }[currentFilter] || "all";
+  if (healthParam !== "all") params.set("health", healthParam);
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
-
-    const res = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`, { signal: controller.signal });
+    const res = await fetch(`${API_BASE}/api/animals?${params}`, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (res.ok) {
       animals = await res.json();
+      totalCount = Number(res.headers.get("X-Total-Count") || animals.length);
+      currentPage = page;
       isBackendConnected = true;
       dot.classList.remove("offline");
       label.textContent = "Live Farm Database";
+      await loadPortalStats();
       return;
     }
   } catch (err) {
@@ -95,6 +121,40 @@ async function syncAnimals() {
   } catch {
     animals = [];
   }
+  totalCount = animals.length;
+  currentPage = 0;
+  portalStats = null;
+}
+
+/** Direct passport links must work even when the tag is on a later page. */
+async function findAnimal(value, kind) {
+  const local = animals.find(a => kind === "tag"
+    ? (a.tag || "").toLowerCase() === value.toLowerCase()
+    : a.id === value);
+  if (local) return local;
+  if (!isBackendConnected) return null;
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(value)}`);
+    if (res.ok) return await res.json();
+  } catch {
+    // Offline: the missing-record state is shown by the caller.
+  }
+  return null;
+}
+
+function renderPagination() {
+  const nav = $("pagination");
+  if (!nav) return;
+  const pages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  if (pages === 1) {
+    nav.innerHTML = "";
+    return;
+  }
+  nav.innerHTML = `
+    <button type="button" data-page="${currentPage - 1}" ${currentPage === 0 ? "disabled" : ""} aria-label="Previous page">← Previous</button>
+    <span>Page ${currentPage + 1} of ${pages}</span>
+    <button type="button" data-page="${currentPage + 1}" ${currentPage >= pages - 1 ? "disabled" : ""} aria-label="Next page">Next →</button>
+  `;
 }
 
 /** Load the full record only when a directory card with a photo is actually shown. */
@@ -201,11 +261,11 @@ function renderDirectory() {
   document.body.classList.remove("passport-open");
   $("missingRecord").hidden = true;
 
-  // Calculate Metrics
-  const total = animals.length;
-  const healthy = animals.filter(a => a.health === "Healthy").length;
-  const attention = total - healthy;
-  const due = animals.filter(a => {
+  // Totals come from /api/stats so paging does not change the headline numbers.
+  const total = portalStats?.totalCattle ?? animals.length;
+  const healthy = portalStats?.healthyCattle ?? animals.filter(a => a.health === "Healthy").length;
+  const attention = portalStats?.attentionCattle ?? total - healthy;
+  const due = portalStats?.dueVaccinations ?? animals.filter(a => {
     const st = vaccineStatus(a.nextVaccineDate).code;
     return st === "today" || st === "overdue";
   }).length;
@@ -216,29 +276,15 @@ function renderDirectory() {
   $("metricAttention").textContent = attention;
   $("metricDue").textContent = due;
 
-  // Filter animals
-  const query = $("searchInput").value.trim().toLowerCase();
-  const filtered = animals.filter(animal => {
-    // Search match
-    const matchSearch = [animal.name, animal.tag, animal.breed, animal.notes]
-      .some(field => (field || "").toLowerCase().includes(query));
-
-    // Pill filter match
-    let matchFilter = true;
-    if (currentFilter === "healthy") matchFilter = animal.health === "Healthy";
-    if (currentFilter === "attention") matchFilter = animal.health !== "Healthy";
-    if (currentFilter === "vaccine_due") {
-      const st = vaccineStatus(animal.nextVaccineDate).code;
-      matchFilter = st === "today" || st === "overdue";
-    }
-
-    return matchSearch && matchFilter;
-  });
-
-  $("resultsCount").textContent = `Showing ${filtered.length} animal${filtered.length === 1 ? "" : "s"}`;
+  // Search, health pills and paging are applied by the server.
+  const start = totalCount ? currentPage * PAGE_SIZE + 1 : 0;
+  $("resultsCount").textContent = totalCount
+    ? `Showing ${start}–${start + animals.length - 1} of ${totalCount} animals`
+    : "No animals registered";
+  renderPagination();
 
   const grid = $("cattleGrid");
-  if (!filtered.length) {
+  if (!animals.length) {
     grid.innerHTML = `
       <div style="grid-column: 1 / -1; background: var(--paper); padding: 40px; text-align: center; border-radius: 18px; border: 1px dashed var(--line);">
         <div style="font-size: 38px; margin-bottom: 8px;">🐄</div>
@@ -249,7 +295,7 @@ function renderDirectory() {
     return;
   }
 
-  grid.innerHTML = filtered.map(animal => {
+  grid.innerHTML = animals.map(animal => {
     const isHealthy = animal.health === "Healthy";
     const vStatus = vaccineStatus(animal.nextVaccineDate);
 
@@ -368,9 +414,26 @@ function openPassportById(id) {
 // -----------------------------------------------------------------------------
 
 function setupEventListeners() {
-  // Search
-  $("searchInput").addEventListener("input", renderDirectory);
-  $("searchButton").addEventListener("click", renderDirectory);
+  // Search and filtering run server-side so paging stays correct.
+  let reloadTimer;
+  function reloadPage() {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(async () => {
+      await syncAnimals(0);
+      renderDirectory();
+      await hydratePhotos();
+    }, 250);
+  }
+  $("searchInput").addEventListener("input", reloadPage);
+  $("searchButton").addEventListener("click", reloadPage);
+
+  $("pagination")?.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-page]");
+    if (!button || button.disabled) return;
+    await syncAnimals(Number(button.dataset.page));
+    renderDirectory();
+    await hydratePhotos();
+  });
 
   // Cattle Grid Card Click Delegation
   $("cattleGrid").addEventListener("click", (e) => {
@@ -392,7 +455,7 @@ function setupEventListeners() {
     btn.classList.add("active");
     btn.setAttribute("aria-pressed", "true");
     currentFilter = btn.dataset.filter;
-    renderDirectory();
+    reloadPage();
   });
 
   // Back to Directory
@@ -417,16 +480,16 @@ function setupEventListeners() {
   });
 
   // Popstate handler for browser back/forward buttons
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", async () => {
     const params = new URLSearchParams(window.location.search);
     const tag = params.get("tag");
     const id = params.get("id");
     if (tag) {
-      const a = animals.find(item => (item.tag || "").toLowerCase() === tag.toLowerCase());
+      const a = await findAnimal(tag, "tag");
       if (a) return showPassport(a);
     }
     if (id) {
-      const a = animals.find(item => item.id === id);
+      const a = await findAnimal(id, "id");
       if (a) return showPassport(a);
     }
     renderDirectory();

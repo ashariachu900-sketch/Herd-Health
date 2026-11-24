@@ -49,8 +49,12 @@ function clearAdminToken() {
   }
 }
 
+const PAGE_SIZE = 50;
 let animals = [];
 let isBackendConnected = false;
+let currentPage = 0;
+let totalCount = 0;
+let dashboardStats = null;
 let toastTimer;
 
 const $ = (id) => document.getElementById(id);
@@ -116,20 +120,42 @@ async function hydratePhotos() {
   renderAll();
 }
 
-async function syncAnimals() {
+/** Dashboard aggregates come from the server so paging does not skew the totals. */
+async function loadStats() {
+  try {
+    const res = await fetch(`${API_BASE}/api/stats`);
+    if (res.ok) dashboardStats = await res.json();
+  } catch {
+    // Keep the last known stats while offline.
+  }
+}
+
+async function syncAnimals(page = 0) {
+  const params = new URLSearchParams({
+    summary: "true",
+    limit: String(PAGE_SIZE),
+    offset: String(page * PAGE_SIZE)
+  });
+  const search = ($("cattleSearch")?.value || "").trim();
+  if (search) params.set("search", search);
+  const health = $("healthFilter")?.value || "all";
+  if (health !== "all") params.set("health", health);
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
-
-    const response = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`, {
+    const response = await fetch(`${API_BASE}/api/animals?${params}`, {
       signal: controller.signal
     });
     clearTimeout(timeout);
 
     if (response.ok) {
       animals = await response.json();
+      totalCount = Number(response.headers.get("X-Total-Count") || animals.length);
+      currentPage = page;
       saveLocalAnimals(); // Keep localStorage in sync as backup cache
       updateConnectionUI(true);
+      await loadStats();
       return;
     }
   } catch (error) {
@@ -139,6 +165,24 @@ async function syncAnimals() {
   // Fallback to local storage
   updateConnectionUI(false);
   animals = loadLocalAnimals();
+  totalCount = animals.length;
+  currentPage = 0;
+  dashboardStats = null;
+}
+
+function renderPagination() {
+  const nav = $("pagination");
+  if (!nav) return;
+  const pages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  if (pages === 1) {
+    nav.innerHTML = "";
+    return;
+  }
+  nav.innerHTML = `
+    <button type="button" data-page="${currentPage - 1}" ${currentPage === 0 ? "disabled" : ""} aria-label="Previous page">← Previous</button>
+    <span>Page ${currentPage + 1} of ${pages}</span>
+    <button type="button" data-page="${currentPage + 1}" ${currentPage >= pages - 1 ? "disabled" : ""} aria-label="Next page">Next →</button>
+  `;
 }
 
 // -----------------------------------------------------------------------------
@@ -339,7 +383,8 @@ $("animalForm").addEventListener("submit", async (event) => {
       return;
     }
 
-    await syncAnimals();
+    await syncAnimals(currentPage);
+    renderAll();
     await hydratePhotos();
 
     closeModal();
@@ -382,7 +427,8 @@ async function deleteAnimal(id) {
       showToast("Delete failed: " + (errData.error || "Server error"));
       return;
     }
-    await syncAnimals();
+    await syncAnimals(currentPage);
+    renderAll();
     await hydratePhotos();
     showToast("Animal record deleted from database.");
   } catch (e) {
@@ -409,14 +455,14 @@ function animalPhotoMarkup(animal, mini = false) {
 }
 
 function renderDashboard() {
-  const total = animals.length;
-  const healthy = animals.filter(a => a.health === "Healthy").length;
-  const attention = total - healthy;
-  const due = animals.filter(a => {
+  const total = dashboardStats?.totalCattle ?? animals.length;
+  const healthy = dashboardStats?.healthyCattle ?? animals.filter(a => a.health === "Healthy").length;
+  const attention = dashboardStats?.attentionCattle ?? total - healthy;
+  const due = dashboardStats?.dueVaccinations ?? animals.filter(a => {
     const status = vaccineStatus(a.nextVaccineDate);
     return status === "today" || status === "overdue";
   }).length;
-  const vaccineCount = animals.filter(a => a.vaccineName || a.lastVaccineDate || a.nextVaccineDate).length;
+  const vaccineCount = dashboardStats?.totalVaccines ?? animals.filter(a => a.vaccineName || a.lastVaccineDate || a.nextVaccineDate).length;
   const percentage = total ? Math.round(healthy / total * 100) : 0;
 
   $("totalCattle").textContent = total;
@@ -429,9 +475,10 @@ function renderDashboard() {
   $("healthRing").style.background =
     `conic-gradient(#5b8c61 ${percentage}%, #e8eee2 ${percentage}% 100%)`;
 
-  const upcoming = animals
-    .filter(a => a.nextVaccineDate && vaccineStatus(a.nextVaccineDate) !== "none")
-    .sort((a, b) => a.nextVaccineDate.localeCompare(b.nextVaccineDate))
+  const upcoming = (dashboardStats?.upcoming ?? animals
+    .filter(a => a.nextVaccineDate && vaccineStatus(a.nextVaccineDate) !== "none"))
+    .slice()
+    .sort((a, b) => (a.nextVaccineDate || "").localeCompare(b.nextVaccineDate || ""))
     .slice(0, 4);
 
   $("upcomingList").innerHTML = upcoming.length ? upcoming.map(animal => {
@@ -455,7 +502,7 @@ function renderDashboard() {
       <span>Add a vaccination date to see reminders here.</span>
     </div>`;
 
-  const recent = animals.slice(0, 3);
+  const recent = dashboardStats?.recent ?? animals.slice(0, 3);
   $("recentCattle").innerHTML = recent.length ? recent.map(animal => `
     <div class="mini-animal">
       ${animalPhotoMarkup(animal, true)}
@@ -466,19 +513,13 @@ function renderDashboard() {
 }
 
 function renderCattle() {
-  const search = $("cattleSearch").value.trim().toLowerCase();
-  const filter = $("healthFilter").value;
+  // Search, health filter and paging are applied by the server before we get here.
+  const start = totalCount ? currentPage * PAGE_SIZE + 1 : 0;
+  $("cattleCount").textContent = totalCount
+    ? `Showing ${start}–${start + animals.length - 1} of ${totalCount} animals`
+    : "0 animals";
 
-  const filtered = animals.filter(animal => {
-    const matchesSearch = [animal.name, animal.tag, animal.breed]
-      .some(value => (value || "").toLowerCase().includes(search));
-    const matchesHealth = filter === "all" || animal.health === filter;
-    return matchesSearch && matchesHealth;
-  });
-
-  $("cattleCount").textContent = `${filtered.length} animal${filtered.length === 1 ? "" : "s"}`;
-
-  $("cattleGrid").innerHTML = filtered.length ? filtered.map(animal => `
+  $("cattleGrid").innerHTML = animals.length ? animals.map(animal => `
     <article class="animal-card">
       <div class="animal-photo">
         ${animalPhotoMarkup(animal)}
@@ -581,6 +622,7 @@ function renderQrCodes() {
 function renderAll() {
   renderDashboard();
   renderCattle();
+  renderPagination();
   renderVaccinations();
   renderQrCodes();
 }
@@ -683,9 +725,26 @@ document.addEventListener("keydown", event => {
   }
 });
 
-// Cattle search and filtering
-$("cattleSearch").addEventListener("input", renderCattle);
-$("healthFilter").addEventListener("change", renderCattle);
+// Cattle search and filtering now run on the server so paging stays correct.
+let reloadTimer;
+function reloadPage() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(async () => {
+    await syncAnimals(0);
+    renderAll();
+    await hydratePhotos();
+  }, 250);
+}
+$("cattleSearch").addEventListener("input", reloadPage);
+$("healthFilter").addEventListener("change", reloadPage);
+
+$("pagination")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (!button || button.disabled) return;
+  await syncAnimals(Number(button.dataset.page));
+  renderAll();
+  await hydratePhotos();
+});
 
 // Cattle card and QR actions
 document.addEventListener("click", event => {
@@ -737,13 +796,9 @@ if (backupBtn) {
         headers: { "X-Admin-Token": getAdminToken() }
       });
     } catch (err) {
-      download({
-        exportedAt: new Date().toISOString(),
-        source: "local-offline-cache",
-        totalRecords: animals.length,
-        animals
-      }, `cattlecare_local_backup_${dateStr}.json`);
-      showToast("Offline herd backup downloaded from local cache. 💾");
+      // The paged local cache holds only the last viewed page. Downloading it
+      // would look like a complete backup while silently omitting other animals.
+      showToast("Offline backup unavailable: connect to the server to export every record.");
       return;
     }
 

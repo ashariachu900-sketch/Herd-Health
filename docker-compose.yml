@@ -1,0 +1,51 @@
+services:
+  app:
+    build: .
+    environment:
+      # Compose reads .env from the project directory automatically. Tokens are
+      # deliberately not given defaults here; server.py refuses to start without them.
+      FARM_ADMIN_TOKEN: ${FARM_ADMIN_TOKEN:-}
+      FARM_VET_TOKEN: ${FARM_VET_TOKEN:-}
+      PORT: 8000
+      # Only reachable from the proxy on the private compose network.
+      BIND_HOST: 0.0.0.0
+      CATTLECARE_DB: /app/data/cattlecare.db
+      CATTLECARE_UPLOADS: /app/uploads
+      CATTLECARE_LOG_DIR: /app/logs
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
+    volumes:
+      - cattlecare-data:/app/data
+      - cattlecare-uploads:/app/uploads
+      - cattlecare-logs:/app/logs
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  cattlecare-data:
+  cattlecare-uploads:
+  cattlecare-logs:
+  caddy-data:
+  caddy-config:

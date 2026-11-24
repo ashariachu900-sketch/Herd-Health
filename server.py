@@ -17,16 +17,27 @@ Endpoints:
   Static files                   - index.html, portal.html, CSS, JS
 
 FARM_ADMIN_TOKEN and FARM_VET_TOKEN are both required at startup. There are no
-default credentials. Requests are rate-limited by a bounded semaphore and a
-10-second socket timeout. For public access, use a TLS reverse proxy.
+default credentials. Failed token guesses are throttled per client IP, requests
+are bounded by a semaphore and a 10-second socket timeout, and JSON logs rotate
+when CATTLECARE_LOG_DIR is set.
+
+Environment overrides for deployment:
+  BIND_HOST            - defaults to 127.0.0.1; set 0.0.0.0 only behind a proxy
+  CATTLECARE_DB        - database path (mount a persistent volume)
+  CATTLECARE_UPLOADS   - photo directory (mount a persistent volume)
+  CATTLECARE_LOG_DIR   - enables a rotating server.log
+Terminate TLS at a reverse proxy; never expose port 8000 directly.
 """
 
 import os
 import re
 import hmac
 import json
+import time
 import uuid
 import base64
+import logging
+import logging.handlers
 import threading
 import sqlite3
 import datetime
@@ -34,10 +45,11 @@ import urllib.parse
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 PORT = int(os.environ.get("PORT", 8000))
+BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "cattlecare.db")
+DB_PATH = os.environ.get("CATTLECARE_DB", os.path.join(BASE_DIR, "cattlecare.db"))
 STATIC_DIR = BASE_DIR
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+UPLOAD_DIR = os.environ.get("CATTLECARE_UPLOADS", os.path.join(BASE_DIR, "uploads"))
 MAX_BODY_SIZE = 5 * 1024 * 1024  # 5 MB payload limit (anti-DoS)
 
 # No hardcoded fallback: tokens must come from the environment (see .env.example).
@@ -49,6 +61,62 @@ HEALTH_VALUES = ("Healthy", "Needs attention")
 FIELD_LIMITS = {"name": 50, "tag": 30, "breed": 50, "vaccineName": 70, "notes": 1000}
 MAX_CONCURRENT_REQUESTS = 32
 REQUEST_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+
+# Failed-attempt throttling: five bad tokens from one IP in five minutes is enough.
+MAX_FAILED_ATTEMPTS = 5
+ATTEMPT_WINDOW_SECONDS = 300
+FAILED_ATTEMPTS = {}
+FAILED_ATTEMPTS_LOCK = threading.Lock()
+
+# Short-lived dashboard cache, invalidated by every write.
+STATS_CACHE = {}
+STATS_CACHE_TTL = 2
+
+LOGGER = logging.getLogger("cattlecare")
+
+def configure_logging():
+    """Log to stdout and, when configured, to a rotating file for deployment."""
+    handlers = [logging.StreamHandler()]
+    log_dir = os.environ.get("CATTLECARE_LOG_DIR")
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(
+            os.path.join(log_dir, "server.log"), maxBytes=5 * 1024 * 1024, backupCount=3
+        ))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+def client_ip(handler):
+    """In-process tests have no socket; use a stable label for them."""
+    return handler.client_address[0] if getattr(handler, "client_address", None) else "in-process"
+
+def is_rate_limited(handler):
+    ip = client_ip(handler)
+    now = time.time()
+    with FAILED_ATTEMPTS_LOCK:
+        count, last = FAILED_ATTEMPTS.get(ip, (0, 0))
+    if count >= MAX_FAILED_ATTEMPTS and now - last <= ATTEMPT_WINDOW_SECONDS:
+        LOGGER.warning("Rate-limited auth attempts from %s", ip)
+        handler.send_json(429, {"error": "Too many failed attempts. Try again in 5 minutes."})
+        return True
+    return False
+
+def record_auth_failure(handler):
+    ip = client_ip(handler)
+    now = time.time()
+    with FAILED_ATTEMPTS_LOCK:
+        count, last = FAILED_ATTEMPTS.get(ip, (0, 0))
+        if now - last > ATTEMPT_WINDOW_SECONDS:
+            count = 0
+        FAILED_ATTEMPTS[ip] = (count + 1, now)
+
+def clear_auth_failures(handler):
+    with FAILED_ATTEMPTS_LOCK:
+        FAILED_ATTEMPTS.pop(client_ip(handler), None)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
@@ -68,6 +136,8 @@ def ensure_columns(conn):
             conn.execute(f"ALTER TABLE animals ADD COLUMN {name} {definition}")
 
 def init_db():
+    # Support deployment paths such as /app/data/cattlecare.db on a fresh volume.
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -282,12 +352,19 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
     # This app is served from the same origin as its API, so no CORS headers are
     # needed. Wildcard CORS on write endpoints would let other sites call this API.
 
-    def send_json(self, status_code, data):
+    def log_message(self, fmt, *args):
+        """Route access logs through the rotating logger instead of raw stderr."""
+        LOGGER.info("%s %s", client_ip(self), fmt % args)
+
+    def send_json(self, status_code, data, extra_headers=None):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -316,9 +393,14 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             authorization = self.headers.get("Authorization", "")
             token = authorization.removeprefix("Bearer ").strip()
         # Constant-time compare avoids leaking the token through timing differences.
+        # A correct token always works (and resets the counter); only guesses are throttled.
         if ADMIN_TOKEN and token and hmac.compare_digest(token, ADMIN_TOKEN):
+            clear_auth_failures(self)
             return True
-        self.send_json(401, {"error": "Unauthorized: Valid X-Admin-Token required."})
+        if not is_rate_limited(self):
+            record_auth_failure(self)
+            LOGGER.warning("Rejected admin token from %s", client_ip(self))
+            self.send_json(401, {"error": "Unauthorized: Valid X-Admin-Token required."})
         return False
 
     def check_vet_auth(self):
@@ -327,8 +409,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             authorization = self.headers.get("Authorization", "")
             token = authorization.removeprefix("Bearer ").strip()
         if VET_TOKEN and token and hmac.compare_digest(token, VET_TOKEN):
+            clear_auth_failures(self)
             return True
-        self.send_json(401, {"error": "Unauthorized: Valid X-Vet-Token required."})
+        if not is_rate_limited(self):
+            record_auth_failure(self)
+            LOGGER.warning("Rejected vet token from %s", client_ip(self))
+            self.send_json(401, {"error": "Unauthorized: Valid X-Vet-Token required."})
         return False
 
     def do_GET(self):
@@ -363,48 +449,58 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/stats":
+            cached = STATS_CACHE.get("data")
+            if cached and time.time() - STATS_CACHE.get("at", 0) < STATS_CACHE_TTL:
+                self.send_json(200, cached)
+                return
+
             conn = get_db()
             cursor = conn.cursor()
-            # Only the columns needed for aggregates — never load photo/notes blobs here.
+            # Aggregates run in SQLite: no photo/notes blobs and no Python row scan.
             cursor.execute("""
-                SELECT id, name, tag, health, vaccineName, lastVaccineDate,
-                       nextVaccineDate, createdAt
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN health = 'Healthy' THEN 1 ELSE 0 END) AS healthy,
+                       SUM(CASE WHEN date(nextVaccineDate) IS NOT NULL
+                                 AND date(nextVaccineDate) <= date('now') THEN 1 ELSE 0 END) AS due,
+                       SUM(CASE WHEN vaccineName IS NOT NULL OR lastVaccineDate IS NOT NULL
+                                 OR nextVaccineDate IS NOT NULL THEN 1 ELSE 0 END) AS vaccines
                 FROM animals
             """)
-            rows = cursor.fetchall()
+            agg = cursor.fetchone()
+            total = agg["total"] or 0
+            healthy = agg["healthy"] or 0
+
+            columns = "id, name, tag, health, vaccineName, lastVaccineDate, nextVaccineDate, createdAt"
+            cursor.execute(f"""
+                SELECT {columns} FROM animals
+                WHERE nextVaccineDate IS NOT NULL AND nextVaccineDate != ''
+                  AND date(nextVaccineDate) IS NOT NULL
+                ORDER BY date(nextVaccineDate) ASC LIMIT 4
+            """)
+            upcoming = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(f"SELECT {columns} FROM animals ORDER BY createdAt DESC LIMIT 3")
+            recent = [dict(r) for r in cursor.fetchall()]
             conn.close()
 
-            animals = [dict(r) for r in rows]
-            total = len(animals)
-            healthy = sum(1 for a in animals if a["health"] == "Healthy")
-            attention = total - healthy
-            due = sum(1 for a in animals if vaccine_status(a["nextVaccineDate"]) in ("today", "overdue"))
-            vaccine_count = sum(1 for a in animals if (a["vaccineName"] or a["lastVaccineDate"] or a["nextVaccineDate"]))
-            percentage = round((healthy / total * 100)) if total > 0 else 0
-
-            # Upcoming list sorted by nextVaccineDate
-            upcoming = [
-                a for a in animals
-                if a["nextVaccineDate"] and vaccine_status(a["nextVaccineDate"]) != "none"
-            ]
-            upcoming.sort(key=lambda x: x["nextVaccineDate"])
-
-            self.send_json(200, {
+            payload = {
                 "totalCattle": total,
                 "healthyCattle": healthy,
-                "attentionCattle": attention,
-                "dueVaccinations": due,
-                "totalVaccines": vaccine_count,
-                "healthPercent": percentage,
-                "upcoming": upcoming[:4],
-                "recent": animals[:3]
-            })
+                "attentionCattle": total - healthy,
+                "dueVaccinations": agg["due"] or 0,
+                "totalVaccines": agg["vaccines"] or 0,
+                "healthPercent": round(healthy / total * 100) if total else 0,
+                "upcoming": upcoming,
+                "recent": recent
+            }
+            STATS_CACHE["at"] = time.time()
+            STATS_CACHE["data"] = payload
+            self.send_json(200, payload)
             return
 
         if path == "/api/animals":
             search = query.get("search", [""])[0].strip().lower()
             tag_filter = query.get("tag", [""])[0].strip().lower()
-            health_filter = query.get("health", ["all"])[0].strip()
+            health_filter = query.get("health", ["all"])[0].strip().lower()
             # ?summary=true — omit large base64 photo blobs from list responses.
             # Callers that need the full photo should fetch /api/animals/<id>.
             summary_mode = query.get("summary", ["false"])[0].strip().lower() == "true"
@@ -421,21 +517,25 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if search:
                 escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 like = f"%{escaped}%"
-                clauses.append("(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(tag) LIKE ? ESCAPE '\\' OR LOWER(breed) LIKE ? ESCAPE '\\')")
-                params.extend([like, like, like])
-            if health_filter != "all":
+                clauses.append("(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(tag) LIKE ? ESCAPE '\\' OR LOWER(breed) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(notes, '')) LIKE ? ESCAPE '\\')")
+                params.extend([like, like, like, like])
+            if health_filter == "due":
+                clauses.append("date(nextVaccineDate) IS NOT NULL AND date(nextVaccineDate) <= date('now')")
+            elif health_filter != "all":
                 clauses.append("health = ?")
                 params.append(health_filter)
-            sql = "SELECT * FROM animals"
-            if clauses:
-                sql += " WHERE " + " AND ".join(clauses)
-            sql += " ORDER BY createdAt DESC"
+
+            where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+            filter_params = list(params)  # count query must not receive LIMIT/OFFSET values
+            sql = "SELECT * FROM animals" + where_sql + " ORDER BY createdAt DESC"
             if limit is not None:
                 sql += " LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
 
             conn = get_db()
             cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM animals" + where_sql, filter_params)
+            total_count = cursor.fetchone()["n"]
             cursor.execute(sql, params)
             rows = cursor.fetchall()
             conn.close()
@@ -448,7 +548,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     animal.pop("photo", None)  # strip photo to cut payload size
                 results.append(animal)
 
-            self.send_json(200, results)
+            self.send_json(200, results, {"X-Total-Count": str(total_count)})
             return
 
         if path.startswith("/api/animals/"):
@@ -525,6 +625,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 VALUES (?, ?, ?, ?)
             """, (animal_id, verified_by, verified_at, "vet-token"))
             conn.commit()
+            STATS_CACHE.clear()
             cursor.execute("SELECT * FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
             updated = row_to_dict(cursor.fetchone())
             conn.close()
@@ -577,6 +678,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     fields["nextVaccineDate"], fields["notes"], photo_path, created_at
                 ))
                 conn.commit()
+                STATS_CACHE.clear()
             except sqlite3.IntegrityError:
                 conn.close()
                 self.send_json(409, {"error": "Record conflicts with an existing ID or tag."})
@@ -656,6 +758,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 fields["nextVaccineDate"], fields["notes"], photo_to_save, real_id
             ))
             conn.commit()
+            STATS_CACHE.clear()
 
             cursor.execute("SELECT * FROM animals WHERE id = ?", (real_id,))
             updated_animal = row_to_dict(cursor.fetchone())
@@ -677,7 +780,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             animal_id = urllib.parse.unquote(path.replace("/api/animals/", "").strip())
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, name, tag FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
+            cursor.execute("SELECT id, name, tag, photo FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id))
             animal = cursor.fetchone()
 
             if not animal:
@@ -688,7 +791,16 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             real_id = animal["id"]
             cursor.execute("DELETE FROM animals WHERE id = ?", (real_id,))
             conn.commit()
+            STATS_CACHE.clear()
             conn.close()
+
+            # Remove the photo file too; otherwise deleted records leave orphaned uploads.
+            photo = animal["photo"] or ""
+            if photo.startswith("/uploads/"):
+                try:
+                    os.remove(os.path.join(UPLOAD_DIR, os.path.basename(photo)))
+                except OSError:
+                    pass  # already gone or unwritable: the database row is still deleted
 
             self.send_json(200, {
                 "success": True,
@@ -707,24 +819,21 @@ def run_server(port=PORT):
             f"{', '.join(missing)} not set. Set both before starting the server "
             "(see .env.example and README.md)."
         )
+    configure_logging()
     init_db()
-    # Local development listens only on loopback; use a TLS reverse proxy for real deployment.
-    server_address = ("127.0.0.1", port)
+    # Local development listens only on loopback; BIND_HOST=0.0.0.0 is for a private container network.
+    server_address = (BIND_HOST, port)
     httpd = ThreadingHTTPServer(server_address, CattleRequestHandler)
-    print("=" * 60)
-    print(f"  CattleCare Multi-Threaded Backend Server is running!")
-    print(f"  URL: http://localhost:{port}")
-    print(f"  Portal: http://localhost:{port}/portal.html")
-    print(f"  API: http://localhost:{port}/api/animals")
-    print(f"  Database: {DB_PATH}")
-    print("=" * 60)
-    print("Press Ctrl+C to stop the server.")
+    LOGGER.info("CattleCare backend listening on %s:%s", BIND_HOST, port)
+    LOGGER.info("Portal: http://localhost:%s/portal.html", port)
+    LOGGER.info("API: http://localhost:%s/api/animals", port)
+    LOGGER.info("Database: %s", DB_PATH)
+    LOGGER.info("Uploads: %s", UPLOAD_DIR)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping server gracefully...")
+        LOGGER.info("Stopping server gracefully")
         httpd.server_close()
-        print("Server stopped.")
 
 if __name__ == "__main__":
     run_server()

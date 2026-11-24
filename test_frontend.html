@@ -1,0 +1,127 @@
+<!doctype html>
+<!--
+  Browser-only DOM test for the Farmer Workspace backup button.
+
+  Run:
+    python -m http.server 8765
+    open http://localhost:8765/test_frontend.html
+  The page reports PASS or FAIL in #testResult and in the browser console.
+
+  This exercises the real script.js click handler with a mocked fetch: no token
+  in the request header or wrong download name makes the test fail.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>CattleCare frontend test harness</title></head>
+<body>
+  <strong id="testResult">RUNNING</strong>
+  <pre id="testDetails"></pre>
+
+  <!-- Minimal DOM expected by script.js at load time. -->
+  <input id="adminTokenInput" value="ignored-because-session-cache-is-set">
+  <button id="exportBackupBtn">Export backup</button>
+  <span id="liveDot"></span><span id="liveStatus"></span>
+  <span id="todayDate"></span><span id="footerYear"></span>
+  <span id="pageCrumb"></span><aside id="sidebar"></aside><button id="menuToggle"></button>
+  <div id="toast"></div>
+  <span id="totalCattle"></span><span id="healthyCattle"></span><span id="attentionCattle"></span>
+  <span id="dueVaccinations"></span><span id="totalVaccines"></span><span id="healthPercent"></span>
+  <div id="healthRing"></div><span id="legendHealthy"></span><span id="legendAttention"></span>
+  <div id="upcomingList"></div><div id="recentCattle"></div>
+  <input id="cattleSearch"><select id="healthFilter"><option value="all">All</option></select>
+  <div id="cattleCount"></div><div id="cattleGrid"></div><nav id="pagination"></nav>
+  <table id="vaccineTable"></table><span id="vaccineSummary"></span>
+  <div id="qrGrid"></div>
+  <div id="animalModal"><span id="modalTitle"></span>
+    <form id="animalForm">
+      <input id="animalId"><input id="animalName"><input id="animalTag"><input id="animalBreed">
+      <input id="animalDob"><select id="animalHealth"></select><input id="lastVaccineDate">
+      <input id="vaccineName"><input id="nextVaccineDate"><textarea id="doctorNotes"></textarea>
+      <input id="animalPhoto" type="file"><span id="formMessage"></span>
+      <button type="submit">Save</button><button id="cancelForm"></button><button id="closeModal"></button>
+    </form>
+  </div>
+  <button id="openFormButton"></button>
+
+  <script>
+    window.__calls = [];
+    window.__downloadName = "";
+    window.__blobText = "";
+
+    const jsonResponse = (payload, total) => ({
+      ok: true,
+      status: 200,
+      headers: { get: (name) => name === "X-Total-Count" ? String(total ?? payload.length) : null },
+      json: async () => payload
+    });
+
+    window.fetch = async (url, options = {}) => {
+      window.__calls.push({ url: String(url), options });
+      if (String(url).endsWith("/api/animals")) return jsonResponse([]);
+      if (String(url).endsWith("/api/stats")) return jsonResponse({
+        totalCattle: 1, healthyCattle: 1, attentionCattle: 0, dueVaccinations: 0,
+        totalVaccines: 1, healthPercent: 100, upcoming: [], recent: []
+      });
+      if (String(url).endsWith("/api/export")) return jsonResponse({
+        exportedAt: "test", totalRecords: 1,
+        animals: [{ id: "test-1", name: "Test cow", tag: "TEST-1" }]
+      });
+      throw new Error("Unexpected fetch: " + url);
+    };
+
+    URL.createObjectURL = (blob) => {
+      blob.text().then((text) => { window.__blobText = text; });
+      return "blob:mock";
+    };
+    URL.revokeObjectURL = () => {};
+    HTMLAnchorElement.prototype.click = function () { window.__downloadName = this.download; };
+
+    sessionStorage.setItem("farm_admin_token", "frontend-test-token");
+    localStorage.setItem("cattlecare_solarpunk_v1", "[]");
+  </script>
+
+  <!-- The real application code under test. -->
+  <script src="script.js"></script>
+
+  <script>
+    (async () => {
+      const result = document.getElementById("testResult");
+      const details = document.getElementById("testDetails");
+      const checks = [];
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 150)); // let init() finish
+        document.getElementById("exportBackupBtn").click();
+        await new Promise((resolve) => setTimeout(resolve, 150)); // let download() finish
+
+        const exportCall = window.__calls.find((call) => call.url.endsWith("/api/export"));
+        const sentToken = exportCall?.options?.headers?.["X-Admin-Token"];
+        const expectedName = `cattlecare_backup_${new Date().toISOString().split("T")[0]}.json`;
+        let exported = {};
+        try { exported = JSON.parse(window.__blobText); } catch (error) { /* reported below */ }
+
+        checks.push(["export request issued", Boolean(exportCall)]);
+        checks.push(["admin token header sent", sentToken === "frontend-test-token"]);
+        checks.push(["correct download filename", window.__downloadName === expectedName]);
+        checks.push(["export payload downloaded", exported.totalRecords === 1 && exported.animals?.[0]?.tag === "TEST-1"]);
+
+        // A paged local cache is incomplete: clicking offline must not pretend otherwise.
+        window.fetch = async () => { throw new Error("simulated offline state"); };
+        window.__downloadName = "";
+        window.__blobText = "";
+        document.getElementById("exportBackupBtn").click();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        checks.push(["offline backup is not faked", window.__downloadName === "" && window.__blobText === ""]);
+      } catch (error) {
+        checks.push(["no exception", false]);
+        window.__testError = String(error);
+      }
+
+      const passed = checks.every(([, ok]) => ok);
+      result.textContent = passed ? "PASS" : "FAIL";
+      result.dataset.result = passed ? "pass" : "fail";
+      details.textContent = checks.map(([name, ok]) => `${ok ? "✓" : "✗"} ${name}`).join("\n")
+        + (window.__testError ? `\n${window.__testError}` : "");
+      console[passed ? "log" : "error"]("CattleCare frontend backup test:", result.textContent, details.textContent);
+    })();
+  </script>
+</body>
+</html>

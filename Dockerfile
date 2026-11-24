@@ -2,11 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY server.py test_server.py ./
+COPY server.py test_server.py backup.py ./
 COPY index.html portal.html style.css portal.css script.js portal.js ./
+COPY vendor/qrcode.min.js vendor/
 COPY README.md LICENSE .env.example ./
 
-RUN mkdir -p uploads
+RUN mkdir -p uploads data logs
 
 ENV PORT=8000
 EXPOSE 8000

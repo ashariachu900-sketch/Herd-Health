@@ -310,6 +310,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .search-box input { width: 100%; min-height: 43px; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
 .toolbar select { min-width: 170px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); color: #5e705f; font-size: 12px; }
 .result-count { margin: 0 0 13px; color: var(--muted); font-size: 12px; }
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 22px 0 6px; }
+.pagination button { min-height: 34px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--text); font-size: 12px; cursor: pointer; }
+.pagination button:disabled { opacity: .45; cursor: not-allowed; }
+.pagination span { color: var(--muted); font-size: 12px; }
 .cattle-grid, .qr-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .animal-card, .qr-card { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); box-shadow: var(--shadow); }
 .animal-photo { position: relative; height: 160px; background: #e5eddf; }
