@@ -4,6 +4,8 @@ A full-stack livestock records app with two sides: a **Farmer Workspace** for re
 
 > **Deployment status:** the app is ready for a small, private deployment behind a TLS reverse proxy. It is not a substitute for a regulated veterinary records system. If you enter real personally identifiable medical data, you own the legal, contractual and operational requirements (consent, retention, encryption at rest, incident response).
 
+> **Local-only GitHub Pages note:** GitHub Pages hosts static files only and cannot run `server.py`. The browser deliberately treats `*.github.io` URLs as local-only and does not send login/API requests to GitHub Pages. Open `http://localhost:8000/` for the app and keep `.env` credentials on the local machine.
+
 ---
 
 ## Project structure
@@ -222,7 +224,7 @@ A local backup directory is **not** disaster recovery. Copy the JSON files to en
 ```bat
 python -m unittest test_server.py -v
 ```
-52 tests cover date logic, schema/indexes/migration, generated unique tag sequences, vaccination/cow synchronization, chronological vaccination updates, sequence-preserving restore, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
+53 tests cover date logic, schema/indexes/migration, generated unique tag sequences, vaccination/cow synchronization, chronological vaccination updates, sequence-preserving restore, local-only GitHub Pages behavior, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
 
 CI (`.github/workflows/tests.yml`) runs the tests, compiles the Python entrypoints, parses both browser scripts with `node --check`, and validates `docker compose config` on every push/PR.
 

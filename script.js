@@ -8,6 +8,7 @@
 
 const STORAGE_KEY = "cattlecare_solarpunk_v1";
 const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+const IS_GITHUB_PAGES = window.location.hostname.endsWith(".github.io");
 
 /** Milliseconds in one day — avoids repeating the magic number 86400000. */
 const MS_PER_DAY = 86_400_000;
@@ -37,6 +38,11 @@ function hasAdminSession() {
 }
 
 async function restoreSession() {
+  if (IS_GITHUB_PAGES) {
+    sessionInfo = null;
+    updateSessionUI();
+    return;
+  }
   try {
     const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
     if (res.ok) {
@@ -131,6 +137,14 @@ async function loadStats() {
 }
 
 async function syncAnimals(page = 0) {
+  if (IS_GITHUB_PAGES) {
+    updateConnectionUI(false);
+    animals = loadLocalAnimals();
+    totalCount = animals.length;
+    currentPage = 0;
+    dashboardStats = null;
+    return;
+  }
   const params = new URLSearchParams({
     summary: "true",
     limit: String(PAGE_SIZE),
@@ -861,6 +875,10 @@ $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
 $("footerYear").textContent = new Date().getFullYear();
 
 $("loginBtn")?.addEventListener("click", async () => {
+  if (IS_GITHUB_PAGES) {
+    showToast("Local-only mode: open http://localhost:8000.");
+    return;
+  }
   const token = $("adminTokenInput").value.trim();
   if (!token) {
     showToast("Enter the account passcode.");

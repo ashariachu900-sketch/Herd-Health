@@ -83,6 +83,11 @@ SESSION_COOKIE_NAME = "cattlecare_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))  # 8 hours
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") == "1" or \
     os.environ.get("FORCE_SECURE_COOKIES", "0") == "1"
+ALLOWED_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("CATTLECARE_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+}
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()
 

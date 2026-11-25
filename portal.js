@@ -7,6 +7,7 @@
 
 const STORAGE_KEY = "cattlecare_solarpunk_v1";
 const API_BASE = window.location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+const IS_GITHUB_PAGES = window.location.hostname.endsWith(".github.io");
 
 /** Milliseconds in one day — avoids repeating the magic number 86400000. */
 const MS_PER_DAY = 86_400_000;
@@ -32,14 +33,16 @@ const $ = (id) => document.getElementById(id);
 
 async function init() {
   const urlParams = new URLSearchParams(window.location.search);
-  try {
-    const sessionRes = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
-    if (sessionRes.ok) {
-      const session = await sessionRes.json();
-      vetSession = session.role === "vet" ? session : null;
+  if (!IS_GITHUB_PAGES) {
+    try {
+      const sessionRes = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
+      if (sessionRes.ok) {
+        const session = await sessionRes.json();
+        vetSession = session.role === "vet" ? session : null;
+      }
+    } catch {
+      vetSession = null;
     }
-  } catch {
-    vetSession = null;
   }
   // Public-safe is the only portal view. Full notes/photos live in the farmer
   // workspace behind a session; a scanned tag can never unlock them.
@@ -92,6 +95,18 @@ async function loadPortalStats() {
 }
 
 async function syncAnimals(page = 0) {
+  if (IS_GITHUB_PAGES) {
+    isBackendConnected = false;
+    const dot = $("portalStatusDot");
+    const label = $("portalStatusLabel");
+    dot?.classList.add("offline");
+    if (label) label.textContent = "Local-only: run CattleCare on localhost";
+    animals = [];
+    totalCount = 0;
+    currentPage = 0;
+    portalStats = null;
+    return;
+  }
   const dot = $("portalStatusDot");
   const label = $("portalStatusLabel");
   const params = new URLSearchParams({

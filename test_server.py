@@ -984,6 +984,16 @@ class CattleCareBackendTests(unittest.TestCase):
         finally:
             shutil.rmtree(fresh_dir, ignore_errors=True)
 
+    def test_53_github_pages_is_marked_local_only(self):
+        with open(os.path.join(server.STATIC_DIR, "script.js"), encoding="utf-8") as handle:
+            script = handle.read()
+        with open(os.path.join(server.STATIC_DIR, "portal.js"), encoding="utf-8") as handle:
+            portal = handle.read()
+        self.assertIn('hostname.endsWith(".github.io")', script)
+        self.assertIn("open http://localhost:8000", script)
+        self.assertIn('hostname.endsWith(".github.io")', portal)
+        self.assertIn("Local-only", portal)
+
 
 
 if __name__ == "__main__":
