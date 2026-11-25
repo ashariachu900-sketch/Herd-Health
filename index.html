@@ -11,51 +11,7 @@
   <script src="vendor/qrcode.min.js"></script>
 </head>
 <body>
-  <section class="login-home" id="loginHome" aria-labelledby="loginTitle">
-    <div class="login-scenery" aria-hidden="true">
-      <div class="login-brand scenic-brand"><span>✿</span><strong>CattleCare</strong></div>
-      <div class="sunrise"></div>
-      <div class="field field-back"></div>
-      <div class="field field-front"></div>
-      <div class="scenic-cow">🐄</div>
-      <div class="scenic-copy">
-        <span class="eyebrow">NATURE. HEALTH. TRUST.</span>
-        <h2>One herd.<br><em>Every story cared for.</em></h2>
-      </div>
-    </div>
-    <div class="login-card">
-      <div class="login-mobile-brand"><span>✿</span><strong>CattleCare</strong></div>
-      <div class="login-card-header">
-        <span class="eyebrow">WELCOME BACK</span>
-        <span class="login-step">Secure access</span>
-      </div>
-      <h1 id="loginTitle">How would you<br><em>like to continue?</em></h1>
-      <p class="login-intro">Select your role and sign in to continue.</p>
-      <div class="role-selector" role="tablist" aria-label="Login role">
-        <button type="button" class="role-card active" data-role="admin" role="tab" aria-selected="true">
-          <span class="role-icon">🌱</span><strong>Farmer</strong><small>Manage cattle & care records</small>
-        </button>
-        <button type="button" class="role-card" data-role="vet" role="tab" aria-selected="false">
-          <span class="role-icon">✚</span><strong>Veterinarian</strong><small>Review & verify records</small>
-        </button>
-      </div>
-      <form id="loginForm" class="login-form">
-        <div class="login-field">
-          <label for="loginRoleName">Username</label>
-          <input id="loginRoleName" type="text" maxlength="50" required autocomplete="username" placeholder="user">
-        </div>
-        <div class="login-field">
-          <label for="loginPasscode">Password</label>
-          <input id="loginPasscode" type="password" autocomplete="current-password" required placeholder="password">
-        </div>
-        <p class="login-error" id="loginError" role="alert"></p>
-        <button type="submit" class="primary-button" id="loginSubmit">Continue as Farmer</button>
-      </form>
-      <a class="public-link" href="portal.html">View the public health portal <span>→</span></a>
-    </div>
-  </section>
-
-  <div class="app-shell" id="appShell" hidden>
+  <div class="app-shell" id="appShell">
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="#" aria-label="CattleCare home">
         <span class="brand-mark">✿</span>
@@ -95,8 +51,6 @@
           <a href="portal.html" target="_blank" class="portal-header-btn" title="Open Public & Vet Inspection Portal">
             <span>🌐</span> Public / Vet Portal ↗
           </a>
-          <span class="session-label" id="sessionLabel"></span>
-          <button class="small-button" id="logoutBtn" type="button">Sign out</button>
           <span class="live-dot" id="liveDot"></span>
           <span class="live-label" id="liveStatus">Connecting to backend...</span>
           <div class="avatar">🌱</div>

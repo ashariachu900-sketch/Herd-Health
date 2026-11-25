@@ -802,18 +802,15 @@ class CattleCareBackendTests(unittest.TestCase):
         )[0]
         self.assertIn("renderDirectory()", back_handler)
 
-    def test_45_login_home_has_farmer_and_vet_roles(self):
+    def test_45_login_home_is_removed(self):
         with open(os.path.join(server.STATIC_DIR, "index.html"), encoding="utf-8") as handle:
             html = handle.read()
         with open(os.path.join(server.STATIC_DIR, "script.js"), encoding="utf-8") as handle:
             script = handle.read()
-        self.assertIn('id="loginHome"', html)
-        self.assertIn('data-role="admin"', html)
-        self.assertIn('data-role="vet"', html)
-        self.assertIn('placeholder="user"', html)
-        self.assertIn('placeholder="password"', html)
-        self.assertIn("/api/session", script)
-        self.assertIn('portal.html', script)
+        self.assertNotIn('id="loginHome"', html)
+        self.assertNotIn("loginForm", html)
+        self.assertNotIn("role-card", html)
+        self.assertNotIn("/api/session", script)
 
     def test_46_shared_demo_login_for_both_roles(self):
         for role in ("admin", "vet"):

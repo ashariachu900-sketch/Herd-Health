@@ -26,9 +26,6 @@ let dashboardStats = null;
 let analytics = null;
 let careEvents = [];
 let toastTimer;
-let sessionInfo = null;
-let selectedRole = "admin";
-
 const $ = (id) => document.getElementById(id);
 
 // -----------------------------------------------------------------------------
@@ -774,110 +771,8 @@ $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
 });
 $("footerYear").textContent = new Date().getFullYear();
 
-document.querySelectorAll(".role-card").forEach(card => {
-  card.addEventListener("click", () => {
-    selectedRole = card.dataset.role;
-    document.querySelectorAll(".role-card").forEach(item => {
-      const active = item === card;
-      item.classList.toggle("active", active);
-      item.setAttribute("aria-selected", String(active));
-    });
-    $("loginSubmit").textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
-  });
-});
-
-$("loginForm")?.addEventListener("submit", async event => {
-  event.preventDefault();
-  const passcode = $("loginPasscode").value.trim();
-  if (!passcode) {
-    $("loginError").textContent = "Enter your password.";
-    return;
-  }
-  $("loginError").textContent = "";
-  const submitButton = $("loginSubmit");
-  submitButton.disabled = true;
-  submitButton.textContent = "Checking credentials...";
-  try {
-    const res = await fetch(`${API_BASE}/api/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({
-        token: passcode,
-        username: $("loginRoleName").value.trim(),
-        password: passcode,
-        role: selectedRole,
-        operator: $("loginRoleName").value.trim()
-      })
-    });
-    if (!res.ok) {
-      $("loginError").textContent = "Invalid passcode.";
-      submitButton.disabled = false;
-      submitButton.textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
-      return;
-    }
-    sessionInfo = await res.json();
-    if (selectedRole === "vet") {
-      if (sessionInfo.role !== "vet") {
-        $("loginError").textContent = "This passcode is not for veterinarian access.";
-        submitButton.disabled = false;
-        submitButton.textContent = "Continue as Veterinarian";
-        await fetch(`${API_BASE}/api/logout`, { method: "POST", credentials: "same-origin" });
-        return;
-      }
-      window.location.href = "portal.html";
-      return;
-    }
-    if (sessionInfo.role !== "admin") {
-      $("loginError").textContent = "This passcode is not for farmer access.";
-      submitButton.disabled = false;
-      submitButton.textContent = "Continue as Farmer";
-      await fetch(`${API_BASE}/api/logout`, { method: "POST", credentials: "same-origin" });
-      return;
-    }
-    $("loginPasscode").value = "";
-    showApp();
-  } catch {
-    $("loginError").textContent = "Backend unavailable.";
-    submitButton.disabled = false;
-    submitButton.textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
-  }
-});
-
-$("logoutBtn")?.addEventListener("click", async () => {
-  try {
-    await fetch(`${API_BASE}/api/logout`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {}
-    });
-  } catch {}
-  sessionInfo = null;
-  $("appShell").hidden = true;
-  $("loginHome").hidden = false;
-});
-
-function showApp() {
-  $("loginHome").hidden = true;
-  $("appShell").hidden = false;
-  $("sessionLabel").textContent = sessionInfo ? `${sessionInfo.actor} · ${sessionInfo.role}` : "";
-}
-
 // Initialize app: sync with backend, then render
 (async function init() {
-  try {
-    const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
-    if (res.ok) {
-      const restored = await res.json();
-      if (restored.role === "admin") {
-        sessionInfo = restored;
-        showApp();
-      } else if (restored.role === "vet") {
-        window.location.replace("portal.html");
-        return;
-      }
-    }
-  } catch {}
   await syncAnimals();
   renderAll();
   await hydratePhotos();
