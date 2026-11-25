@@ -788,9 +788,16 @@ document.querySelectorAll(".role-card").forEach(card => {
 
 $("loginForm")?.addEventListener("submit", async event => {
   event.preventDefault();
+  const username = $("loginRoleName").value.trim();
   const passcode = $("loginPasscode").value.trim();
+  if (!username) {
+    $("loginError").textContent = "Enter username: user.";
+    $("loginRoleName").focus();
+    return;
+  }
   if (!passcode) {
     $("loginError").textContent = "Enter your password.";
+    $("loginPasscode").focus();
     return;
   }
   $("loginError").textContent = "";
@@ -811,7 +818,7 @@ $("loginForm")?.addEventListener("submit", async event => {
       })
     });
     if (!res.ok) {
-      $("loginError").textContent = "Invalid passcode.";
+      $("loginError").textContent = "Invalid username or password.";
       submitButton.disabled = false;
       submitButton.textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
       return;
