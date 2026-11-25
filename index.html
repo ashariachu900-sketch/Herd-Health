@@ -209,7 +209,9 @@
         </div>
         <div class="panel care-entry-panel">
           <form id="eventForm" class="care-form">
+            <label class="visually-hidden" for="eventAnimal">Animal</label>
             <select id="eventAnimal" aria-label="Animal"></select>
+            <label class="visually-hidden" for="eventType">Event type</label>
             <select id="eventType" aria-label="Event type">
               <option value="vaccination">Vaccination</option>
               <option value="treatment">Treatment</option>
@@ -217,10 +219,15 @@
               <option value="observation">Observation</option>
               <option value="movement">Movement</option>
             </select>
+            <label class="visually-hidden" for="eventTitle">Event title</label>
             <input id="eventTitle" maxlength="80" placeholder="Short title" required>
+            <label class="visually-hidden" for="eventVaccineName">Vaccination name</label>
             <input id="eventVaccineName" maxlength="70" placeholder="Vaccination name">
+            <label class="visually-hidden" for="eventDate">Vaccination date</label>
             <input id="eventDate" type="date" required>
+            <label class="visually-hidden" for="eventNextVaccineDate">Next vaccination date</label>
             <input id="eventNextVaccineDate" type="date" aria-label="Next vaccination date">
+            <label class="visually-hidden" for="eventDetails">Event details</label>
             <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..."></textarea>
             <button type="submit" class="primary-button" id="saveEventBtn">＋ Add event</button>
           </form>

@@ -70,6 +70,10 @@ Keep HTTP-only local development explicitly separate from production.
 - [x] Database connections enable foreign keys.
 - [x] Replaced photo files are removed after successful updates.
 - [x] The API/UI documentation and tests were updated to reflect protected mutations.
+- [x] Audit sessions use server-assigned role actors instead of free-form operator names.
+- [x] Failed-login throttling recognizes forwarded client IPs from trusted private or loopback proxies.
+- [x] Vaccination events validate chronological date ordering.
+- [x] Exports preserve and restores reconcile the animal tag sequence.
 
 ## Remediation Order
 

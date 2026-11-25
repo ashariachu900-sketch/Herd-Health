@@ -31,12 +31,14 @@ TABLE_COLUMNS = {
     ),
     "verification_log": ("id", "animalId", "verifiedBy", "verifiedAt", "actor"),
     "audit_log": ("id", "action", "entityId", "summary", "actor", "createdAt"),
+    "app_sequences": ("name", "nextValue"),
 }
 EXPORT_KEYS = {
     "animals": "animals",
     "careEvents": "care_events",
     "verificationLog": "verification_log",
     "auditLog": "audit_log",
+    "appSequences": "app_sequences",
 }
 
 
@@ -101,7 +103,7 @@ def restore_backup(payload, db_path, upload_dir, force=False):
         if existing:
             for trigger in ("audit_log_no_update", "audit_log_no_delete"):
                 conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            for table in ("care_events", "verification_log", "animals", "audit_log"):
+            for table in ("care_events", "verification_log", "animals", "audit_log", "app_sequences"):
                 conn.execute(f"DELETE FROM {table}")
             _create_audit_triggers(conn)
             conn.commit()
@@ -116,10 +118,59 @@ def restore_backup(payload, db_path, upload_dir, force=False):
                 if not isinstance(record, dict):
                     raise ValueError(f"Rows in '{export_key}' must be objects.")
                 values = [record.get(column) for column in columns]
-                conn.execute(
-                    f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", values
-                )
+                if table == "app_sequences":
+                    conn.execute("""
+                        INSERT INTO app_sequences (name, nextValue)
+                        VALUES (?, ?)
+                        ON CONFLICT(name) DO UPDATE SET nextValue = excluded.nextValue
+                    """, values)
+                elif table == "animals":
+                    defaults = {
+                        "breed": "",
+                        "dob": "",
+                        "health": "Healthy",
+                        "lastVaccineDate": "",
+                        "vaccineName": "",
+                        "nextVaccineDate": "",
+                        "notes": "",
+                        "photo": "",
+                        "createdAt": "",
+                        "verified": 0,
+                        "verifiedBy": "",
+                        "verifiedAt": "",
+                    }
+                    values = [
+                        defaults.get(column, "") if record.get(column) is None else record.get(column)
+                        for column in columns
+                    ]
+                    conn.execute(
+                        f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", values
+                    )
+                else:
+                    conn.execute(
+                        f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", values
+                    )
             counts[table] = len(records)
+
+        max_cow_number = 0
+        for record in conn.execute("SELECT tag FROM animals").fetchall():
+            match = re.fullmatch(r"COW-(\d+)", str(record["tag"] or ""), re.IGNORECASE)
+            if match:
+                max_cow_number = max(max_cow_number, int(match.group(1)))
+        sequence_records = _rows(payload, "appSequences")
+        animal_sequence = max_cow_number + 1
+        for sequence in sequence_records:
+            if sequence.get("name") != "animal_tag":
+                continue
+            try:
+                animal_sequence = max(animal_sequence, int(sequence.get("nextValue") or 1))
+            except (TypeError, ValueError):
+                pass
+        conn.execute("""
+            INSERT INTO app_sequences (name, nextValue)
+            VALUES ('animal_tag', ?)
+            ON CONFLICT(name) DO UPDATE SET nextValue = excluded.nextValue
+        """, (animal_sequence,))
 
         photos = payload.get("photos", [])
         if not isinstance(photos, list):

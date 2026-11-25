@@ -17,7 +17,7 @@ catil helth/
 ├── portal.css          Portal styles and print stylesheet
 ├── portal.js           Portal search, filters, passport renderer (paged API reads)
 ├── server.py           REST API + static file server
-├── test_server.py      49 automated tests (unittest, no dependencies)
+├── test_server.py      52 automated tests (unittest, no dependencies)
 ├── backup.py           Scheduled backup client using /api/export
 ├── restore.py          Rebuilds a database and photos from an export
 ├── Caddyfile           TLS reverse proxy configuration
@@ -222,7 +222,7 @@ A local backup directory is **not** disaster recovery. Copy the JSON files to en
 ```bat
 python -m unittest test_server.py -v
 ```
-49 tests cover date logic, schema/indexes/migration, generated unique tag sequences, vaccination/cow synchronization, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
+52 tests cover date logic, schema/indexes/migration, generated unique tag sequences, vaccination/cow synchronization, chronological vaccination updates, sequence-preserving restore, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
 
 CI (`.github/workflows/tests.yml`) runs the tests, compiles the Python entrypoints, parses both browser scripts with `node --check`, and validates `docker compose config` on every push/PR.
 

@@ -910,6 +910,80 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertEqual(events[0]["vaccineName"], "FMD Vaccine")
         self.client.request("DELETE", f"/api/animals/{aid}")
 
+    def test_50_historical_vaccination_does_not_overwrite_newer_last_date(self):
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "Chronology Cow", "health": "Healthy"}
+        )
+        self.assertEqual(status, 201)
+        aid = created["id"]
+        status, _ = self.client.request(
+            "POST", f"/api/animals/{aid}/events",
+            {
+                "type": "vaccination",
+                "title": "Newer vaccine",
+                "vaccineName": "New Vaccine",
+                "occurredAt": "2027-06-01",
+                "nextVaccineDate": "2028-06-01"
+            }
+        )
+        self.assertEqual(status, 201)
+        status, _ = self.client.request(
+            "POST", f"/api/animals/{aid}/events",
+            {
+                "type": "vaccination",
+                "title": "Older vaccine",
+                "vaccineName": "Old Vaccine",
+                "occurredAt": "2026-06-01",
+                "nextVaccineDate": "2027-06-01"
+            }
+        )
+        self.assertEqual(status, 201)
+        status, animal = self.client.request("GET", f"/api/animals/{aid}")
+        self.assertEqual(status, 200)
+        self.assertEqual(animal["vaccineName"], "New Vaccine")
+        self.assertEqual(animal["lastVaccineDate"], "2027-06-01")
+        self.assertEqual(animal["nextVaccineDate"], "2028-06-01")
+        self.client.request("DELETE", f"/api/animals/{aid}")
+
+    def test_51_session_actor_is_server_role_not_client_name(self):
+        status, login = self.client.request(
+            "POST", "/api/session",
+            {"token": TEST_TOKEN, "operator": "Impersonated Person"},
+            headers={"X-Admin-Token": ""}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(login["actor"], "admin")
+
+    def test_52_restore_preserves_or_advances_id_sequence(self):
+        fresh_dir = tempfile.mkdtemp(prefix="cattlecare_restore_seq_")
+        db_path = os.path.join(fresh_dir, "restored.db")
+        upload_dir = os.path.join(fresh_dir, "uploads")
+        payload = {
+            "schemaVersion": 3,
+            "animals": [{
+                "id": "restored-1",
+                "name": "Restored Cow",
+                "tag": "COW-0099",
+                "health": "Healthy"
+            }],
+            "careEvents": [],
+            "verificationLog": [],
+            "auditLog": [],
+            "appSequences": [{"name": "animal_tag", "nextValue": 500}],
+            "photos": []
+        }
+        try:
+            restore.restore_backup(payload, db_path, upload_dir)
+            conn = sqlite3.connect(db_path)
+            sequence = conn.execute(
+                "SELECT nextValue FROM app_sequences WHERE name = 'animal_tag'"
+            ).fetchone()[0]
+            conn.close()
+            self.assertGreaterEqual(sequence, 500)
+        finally:
+            shutil.rmtree(fresh_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

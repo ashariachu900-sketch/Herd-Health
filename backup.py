@@ -58,7 +58,7 @@ def main():
             removed += 1
 
     extras = sum(len(data.get(key, [])) for key in
-                 ("careEvents", "verificationLog", "auditLog", "photos"))
+                 ("careEvents", "verificationLog", "auditLog", "appSequences", "photos"))
     print(f"Backup written to {path} ({data.get('totalRecords', '?')} animals, {extras} related items)")
     print(f"Removed {removed} backup(s) older than {RETENTION_DAYS} days")
 

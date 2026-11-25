@@ -55,6 +55,7 @@ import threading
 import sqlite3
 import datetime
 import urllib.parse
+import ipaddress
 from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
@@ -80,7 +81,7 @@ REQUEST_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 # value is returned to JavaScript so writes cannot be triggered from another site.
 SESSION_COOKIE_NAME = "cattlecare_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))  # 8 hours
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1" or \
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") == "1" or \
     os.environ.get("FORCE_SECURE_COOKIES", "0") == "1"
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()
@@ -115,7 +116,19 @@ def configure_logging():
 
 def client_ip(handler):
     """In-process tests have no socket; use a stable label for them."""
-    return handler.client_address[0] if getattr(handler, "client_address", None) else "in-process"
+    if not getattr(handler, "client_address", None):
+        return "in-process"
+    peer = handler.client_address[0]
+    forwarded = handler.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        try:
+            peer_ip = ipaddress.ip_address(peer)
+            trusted_proxy = peer_ip.is_loopback or peer_ip.is_private
+            if trusted_proxy:
+                return forwarded.split(",")[0].strip() or peer
+        except ValueError:
+            pass
+    return peer
 
 def prune_failed_attempts_locked(now):
     """Bound the per-IP table; otherwise every guessed IP lives forever."""
@@ -535,6 +548,9 @@ def clean_animal_fields(data):
         if not valid_iso_date(value):
             return None, f"{key} must be a valid YYYY-MM-DD date or empty."
         fields[key] = value
+    if fields["lastVaccineDate"] and fields["nextVaccineDate"]:
+        if datetime.date.fromisoformat(fields["nextVaccineDate"]) < datetime.date.fromisoformat(fields["lastVaccineDate"]):
+            return None, "nextVaccineDate cannot be earlier than lastVaccineDate."
 
     fields["photo"] = str(data.get("photo") or "")
     if fields["photo"] and not (
@@ -729,6 +745,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             for name in ("care_events", "verification_log", "audit_log"):
                 cursor.execute(f"SELECT * FROM {name} ORDER BY id")
                 tables[name] = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("SELECT name, nextValue FROM app_sequences ORDER BY name")
+            tables["app_sequences"] = [dict(r) for r in cursor.fetchall()]
             conn.close()
 
             photos = []
@@ -758,6 +776,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 "careEvents": tables["care_events"],
                 "verificationLog": tables["verification_log"],
                 "auditLog": tables["audit_log"],
+                "appSequences": tables["app_sequences"],
                 "photos": photos
             })
             return
@@ -1041,8 +1060,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     self.send_json(401, {"error": "Unauthorized: invalid session token."})
                 return
             clear_auth_failures(self)
-            operator = str(data.get("operator") or "").strip()[:50]
-            actor = operator or ("Farmer" if role == "admin" else "Veterinarian")
+            actor = "admin" if role == "admin" else "vet"
             sid, session = create_session(role, actor, request_is_secure(self))
             self.send_json(201, {
                 "role": role,
@@ -1085,11 +1103,14 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if event_type not in EVENT_TYPES:
                 self.send_json(400, {"error": "Invalid event type."})
                 return
-            if not title or not valid_iso_date(occurred):
+            if not title or not occurred or not valid_iso_date(occurred):
                 self.send_json(400, {"error": "title and a valid occurredAt date are required."})
                 return
             if next_vaccine and not valid_iso_date(next_vaccine):
                 self.send_json(400, {"error": "nextVaccineDate must be a valid YYYY-MM-DD date or empty."})
+                return
+            if next_vaccine and datetime.date.fromisoformat(next_vaccine) < datetime.date.fromisoformat(occurred):
+                self.send_json(400, {"error": "nextVaccineDate cannot be earlier than occurredAt."})
                 return
             conn = get_db()
             cursor = conn.cursor()
@@ -1116,15 +1137,27 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if event_type == "vaccination":
                 cursor.execute("""
                     UPDATE animals
-                    SET vaccineName = ?,
-                        lastVaccineDate = ?,
-                        nextVaccineDate = CASE WHEN ? <> '' THEN ? ELSE nextVaccineDate END
+                    SET vaccineName = CASE
+                            WHEN lastVaccineDate IS NULL
+                              OR lastVaccineDate = ''
+                              OR date(?) >= date(lastVaccineDate)
+                            THEN ? ELSE vaccineName END,
+                        lastVaccineDate = CASE
+                            WHEN lastVaccineDate IS NULL
+                              OR lastVaccineDate = ''
+                              OR date(?) >= date(lastVaccineDate)
+                            THEN ? ELSE lastVaccineDate END,
+                        nextVaccineDate = CASE
+                            WHEN (? <> ''
+                              AND (lastVaccineDate IS NULL
+                                   OR lastVaccineDate = ''
+                                   OR date(?) >= date(lastVaccineDate)))
+                            THEN ? ELSE nextVaccineDate END
                     WHERE id = ?
                 """, (
-                    linked_vaccine_name,
-                    occurred,
-                    next_vaccine,
-                    next_vaccine,
+                    occurred, linked_vaccine_name,
+                    occurred, occurred,
+                    next_vaccine, occurred, next_vaccine,
                     record["id"]
                 ))
                 STATS_CACHE.clear()
@@ -1213,6 +1246,14 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                         self.send_json(409, {"error": f"Animal ID '{supplied_tag}' is already registered."})
                         return
                     animal_tag = supplied_tag
+                    custom_match = re.fullmatch(r"COW-(\d+)", supplied_tag, re.IGNORECASE)
+                    if custom_match:
+                        custom_number = int(custom_match.group(1)) + 1
+                        cursor.execute("""
+                            UPDATE app_sequences
+                            SET nextValue = MAX(nextValue, ?)
+                            WHERE name = 'animal_tag'
+                        """, (custom_number,))
                 else:
                     animal_tag = generate_animal_tag(cursor)
 
@@ -1318,7 +1359,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 fields["nextVaccineDate"], fields["notes"], photo_to_save, real_id
             ))
             write_audit(conn, "update", real_id,
-                        f"Updated {fields['name']} ({fields['tag']})",
+                        f"Updated {fields['name']} ({animal_tag})",
                         actor_for(self, "farmer"))
             conn.commit()
             STATS_CACHE.clear()

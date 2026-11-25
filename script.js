@@ -15,8 +15,7 @@ const MS_PER_DAY = 86_400_000;
 /** Only allow small data-URI images to be injected into an <img src>. */
 const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
-// This interface is read-only. Write endpoints and backup access remain
-// protected by the backend and are not exposed through passcode controls here.
+// Protected farmer/veterinarian sessions authorize writes and care records.
 const PAGE_SIZE = 50;
 let animals = [];
 let isBackendConnected = false;
@@ -312,6 +311,28 @@ function closeModal() {
   lastFocusedElement?.focus();
   lastFocusedElement = null;
 }
+
+document.addEventListener("keydown", event => {
+  const modal = $("animalModal");
+  if (!modal?.classList.contains("open")) return;
+  if (event.key === "Escape") {
+    closeModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [...modal.querySelectorAll("button, input, select, textarea")]
+    .filter(element => !element.disabled && element.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 
 function resizePhoto(file) {
   return new Promise((resolve, reject) => {
@@ -852,8 +873,7 @@ $("loginBtn")?.addEventListener("click", async () => {
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token,
-        operator: $("loginRole").value === "vet" ? "Veterinarian" : "Farmer"
+        token
       })
     });
     if (!res.ok) {
