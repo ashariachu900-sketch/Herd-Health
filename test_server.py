@@ -183,7 +183,7 @@ class CattleCareBackendTests(unittest.TestCase):
             "vaccineName": "Anthrax Spore",
             "nextVaccineDate": "2026-12-20",
             "notes": "Healthy test heifer.",
-            "photo": "data:image/jpeg;base64,samplephoto123"
+            "photo": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         }
         status, created = self.client.request("POST", "/api/animals", data=new_animal)
         self.assertEqual(status, 201)
@@ -237,15 +237,13 @@ class CattleCareBackendTests(unittest.TestCase):
             status, _ = self.client.request("GET", path)
             self.assertEqual(status, 403, f"{path} must be blocked")
 
-    def test_10_public_mutations_are_allowed(self):
-        status, created = self.client.request(
+    def test_10_unauthorized_mutations(self):
+        status, _ = self.client.request(
             "POST", "/api/animals",
-            data={"name": "Public Cow", "tag": "PUBLIC-001"},
+            data={"name": "Unauthorized Cow", "tag": "UNAUTHORIZED-001"},
             headers={"X-Admin-Token": "invalid-hacker-token"}
         )
-        self.assertEqual(status, 201)
-        status, _ = self.client.request("DELETE", f"/api/animals/{created['id']}")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 401)
 
     def test_11_summary_param_excludes_photos(self):
         payload = {
@@ -372,7 +370,7 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertIn("X-Vet-Token", body["error"])
         self.client.request("DELETE", f"/api/animals/{aid}")
 
-    def test_19_readonly_client_exposes_no_admin_interface(self):
+    def test_19_client_exposes_authenticated_admin_interface(self):
         src_path = os.path.join(server.STATIC_DIR, "script.js")
         with open(src_path, "r", encoding="utf-8") as handle:
             src = handle.read()
@@ -381,8 +379,8 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertNotIn("X-Admin-Token", src)
         self.assertNotIn("sessionStorage", src)
         self.assertNotIn('fetch(`${API_BASE}/api/export`)', src)
-        self.assertNotIn("Admin passcode", html)
-        self.assertNotIn("id=\"loginBtn\"", html)
+        self.assertIn("Account passcode", html)
+        self.assertIn('id="loginBtn"', html)
         self.assertIn("id=\"openFormButton\"", html)
         self.assertIn("id=\"eventForm\"", html)
 
@@ -521,7 +519,7 @@ class CattleCareBackendTests(unittest.TestCase):
             "POST", base, {"type": "vaccination", "title": "Bad token", "occurredAt": "2026-01-01"},
             headers={"X-Admin-Token": "wrong-token"}
         )
-        self.assertEqual(status, 201)
+        self.assertEqual(status, 401)
 
         status, body = self.client.request(
             "POST", base, {"type": "not-a-type", "title": "Bad type", "occurredAt": "2026-01-01"}
@@ -713,16 +711,25 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be different", result.stderr)
 
-    def test_39_public_writes_need_no_cookie_or_csrf(self):
+    def test_39_cookie_sessions_are_csrf_protected_and_auditable(self):
         status, login = self.client.request(
             "POST", "/api/session",
             {"token": TEST_TOKEN, "operator": "Nurse A"},
             headers={"X-Admin-Token": ""}
         )
         self.assertEqual(status, 201)
+        csrf = login["csrfToken"]
+        cookie = self.client.headers_out["Set-Cookie"].split(";")[0]
+        safe_headers = {"X-Admin-Token": "", "Cookie": cookie}
         status, body = self.client.request(
             "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
-            headers={}
+            headers=safe_headers
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("X-CSRF-Token", body["error"])
+        status, body = self.client.request(
+            "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
+            headers={**safe_headers, "X-CSRF-Token": csrf}
         )
         self.assertEqual(status, 201)
         created = body
@@ -802,25 +809,38 @@ class CattleCareBackendTests(unittest.TestCase):
         )[0]
         self.assertIn("renderDirectory()", back_handler)
 
-    def test_45_login_home_is_removed(self):
+    def test_45_compact_login_is_present_without_a_landing_page(self):
         with open(os.path.join(server.STATIC_DIR, "index.html"), encoding="utf-8") as handle:
             html = handle.read()
         with open(os.path.join(server.STATIC_DIR, "script.js"), encoding="utf-8") as handle:
             script = handle.read()
         self.assertNotIn('id="loginHome"', html)
-        self.assertNotIn("loginForm", html)
-        self.assertNotIn("role-card", html)
-        self.assertNotIn("/api/session", script)
+        self.assertIn('id="loginBtn"', html)
+        self.assertIn('id="adminTokenInput"', html)
+        self.assertIn("/api/session", script)
 
-    def test_46_shared_demo_login_for_both_roles(self):
-        for role in ("admin", "vet"):
-            status, body = self.client.request(
-                "POST", "/api/session",
-                {"username": "user", "password": "password", "role": role},
-                headers={"X-Admin-Token": ""}
-            )
-            self.assertEqual(status, 201)
-            self.assertEqual(body["role"], role)
+    def test_46_sensitive_routes_reject_anonymous_access(self):
+        status, _ = self.client.request("GET", "/api/audit", headers={"X-Admin-Token": ""})
+        self.assertEqual(status, 401)
+        status, created = self.client.request(
+            "POST", "/api/animals", {"name": "AccessProbe", "tag": "ACCESS-1"}
+        )
+        self.assertEqual(status, 201)
+        status, _ = self.client.request(
+            "GET", f"/api/animals/{created['id']}/events",
+            headers={"X-Admin-Token": ""}
+        )
+        self.assertEqual(status, 401)
+        self.client.request("DELETE", f"/api/animals/{created['id']}")
+
+    def test_47_demo_credentials_are_not_accepted(self):
+        status, _ = self.client.request(
+            "POST", "/api/session",
+            {"username": "user", "password": "password", "role": "admin"},
+            headers={"X-Admin-Token": ""}
+        )
+        self.assertEqual(status, 401)
+
 
 
 if __name__ == "__main__":

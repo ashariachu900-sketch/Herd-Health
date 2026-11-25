@@ -20,6 +20,17 @@
 
 [hidden] { display: none !important; }
 
+.compact-field {
+  min-height: 34px;
+  max-width: 150px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--text);
+  font-size: 12px;
+}
+
 
 .visually-hidden {
   position: absolute;

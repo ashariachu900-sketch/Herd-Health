@@ -48,6 +48,7 @@ import time
 import uuid
 import secrets
 import base64
+import binascii
 import logging
 import logging.handlers
 import threading
@@ -237,6 +238,7 @@ def actor_for(handler, fallback):
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def ensure_columns(conn):
@@ -287,7 +289,8 @@ def init_db():
             animalId TEXT NOT NULL,
             verifiedBy TEXT NOT NULL,
             verifiedAt TEXT NOT NULL,
-            actor TEXT NOT NULL
+            actor TEXT NOT NULL,
+            FOREIGN KEY(animalId) REFERENCES animals(id) ON DELETE CASCADE
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_verification_animal ON verification_log (animalId);")
@@ -304,7 +307,8 @@ def init_db():
                 details TEXT,
                 occurredAt TEXT NOT NULL,
                 createdAt TEXT NOT NULL,
-                actor TEXT NOT NULL
+                actor TEXT NOT NULL,
+                FOREIGN KEY(animalId) REFERENCES animals(id) ON DELETE CASCADE
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_animal ON care_events (animalId, occurredAt DESC);")
@@ -502,11 +506,25 @@ def persist_photo(photo):
         raise ValueError("Invalid photo format")
     mime_ext = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp"}
     extension = mime_ext[match.group(1)]
-    file_name = f"{uuid.uuid4()}.{extension}"
     encoded = match.group(2)
     encoded += "=" * (-len(encoded) % 4)  # tolerate data URIs without padding
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Invalid base64 image") from exc
+    if len(data) > MAX_BODY_SIZE:
+        raise ValueError("Photo exceeds 5MB limit")
+    signatures = {
+        "png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "jpeg": data.startswith(b"\xff\xd8\xff"),
+        "gif": data.startswith((b"GIF87a", b"GIF89a")),
+        "webp": len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+    }
+    if not signatures[match.group(1)]:
+        raise ValueError("Base64 content does not match its declared image format")
+    file_name = f"{uuid.uuid4()}.{extension}"
     with open(os.path.join(UPLOAD_DIR, file_name), "wb") as handle:
-        handle.write(base64.b64decode(encoded, validate=True))
+        handle.write(data)
     return f"/uploads/{file_name}"
 
 def day_difference(date_str):
@@ -785,6 +803,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/audit":
+            if not self.check_auth():
+                return
             conn = get_db()
             rows = conn.execute(
                 "SELECT * FROM audit_log ORDER BY createdAt DESC, id DESC LIMIT 100"
@@ -809,6 +829,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             return
 
         if path.startswith("/api/animals/") and path.endswith("/events"):
+            if not self.check_auth():
+                return
             animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/events")].strip("/"))
             conn = get_db()
             record = conn.execute(
@@ -956,13 +978,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             if data is None or data == "ERROR":
                 return
             token = str(data.get("token") or "")
-            username = str(data.get("username") or "")
-            password = str(data.get("password") or "")
-            requested_role = str(data.get("role") or "")
             role = None
-            if username == "user" and password == "password" and requested_role in ("admin", "vet"):
-                role = requested_role
-            elif token and ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
+            if token and ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
                 role = "admin"
             elif token and VET_TOKEN and hmac.compare_digest(token, VET_TOKEN):
                 role = "vet"
@@ -1001,6 +1018,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
 
         # Care timeline events: structured history instead of one free-text notes blob.
         if path.startswith("/api/animals/") and path.endswith("/events"):
+            if not self.check_auth(write=True):
+                return
             animal_id = urllib.parse.unquote(path[len("/api/animals/"):-len("/events")].strip("/"))
             data = self.parse_json_body()
             if data is None or data == "ERROR":
@@ -1083,6 +1102,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/animals":
+            if not self.check_auth(write=True):
+                return
             data = self.parse_json_body()
             if data is None or data == "ERROR":
                 return
@@ -1132,6 +1153,11 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 conn.commit()
                 STATS_CACHE.clear()
             except sqlite3.IntegrityError:
+                if photo_path.startswith("/uploads/"):
+                    try:
+                        os.remove(os.path.join(UPLOAD_DIR, os.path.basename(photo_path)))
+                    except OSError:
+                        pass
                 conn.close()
                 self.send_json(409, {"error": "Record conflicts with an existing ID or tag."})
                 return
@@ -1149,6 +1175,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path.startswith("/api/animals/"):
+            if not self.check_auth(write=True):
+                return
             animal_id = urllib.parse.unquote(path.replace("/api/animals/", "").strip())
             data = self.parse_json_body()
             if data is None or data == "ERROR":
@@ -1211,6 +1239,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                         actor_for(self, "farmer"))
             conn.commit()
             STATS_CACHE.clear()
+            old_photo = current["photo"] or ""
+            if old_photo.startswith("/uploads/") and old_photo != photo_to_save:
+                try:
+                    os.remove(os.path.join(UPLOAD_DIR, os.path.basename(old_photo)))
+                except OSError:
+                    pass
 
             cursor.execute("SELECT * FROM animals WHERE id = ?", (real_id,))
             updated_animal = row_to_dict(cursor.fetchone())
@@ -1226,6 +1260,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path.startswith("/api/animals/"):
+            if not self.check_auth(write=True):
+                return
             animal_id = urllib.parse.unquote(path.replace("/api/animals/", "").strip())
             conn = get_db()
             cursor = conn.cursor()

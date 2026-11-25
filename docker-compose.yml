@@ -14,7 +14,7 @@ services:
       CATTLECARE_LOG_DIR: /app/logs
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
       # Set to 1 in production so browser cookies are Secure.
-      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
     volumes:
       - cattlecare-data:/app/data
       - cattlecare-uploads:/app/uploads

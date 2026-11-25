@@ -64,7 +64,7 @@ export FARM_VET_TOKEN=choose-a-different-long-random-string
 python server.py
 ```
 
-Open `http://localhost:8000/` for the Farmer Workspace and `http://localhost:8000/portal.html` for the Public/Vet Portal. For full deployment, env table, backups and API docs, see [`PROJECT_README.md`](PROJECT_README.md).
+Open `http://localhost:8000/` for the Farmer Workspace and `http://localhost:8000/portal.html` for the Public/Vet Portal. The Farmer Workspace requires sign-in for mutations. For full deployment, env table, backups and API docs, see [`PROJECT_README.md`](PROJECT_README.md).
 
 **Demo link / screenshots:**
 Local demo at `http://localhost:8000/`. Screenshot placeholders: `docs/screenshots/dashboard.png`, `docs/screenshots/care-log.png`, `docs/screenshots/passport.png`.

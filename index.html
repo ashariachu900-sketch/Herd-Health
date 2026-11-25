@@ -51,6 +51,16 @@
           <a href="portal.html" target="_blank" class="portal-header-btn" title="Open Public & Vet Inspection Portal">
             <span>🌐</span> Public / Vet Portal ↗
           </a>
+          <span class="session-label" id="sessionLabel">Signed out</span>
+          <label class="visually-hidden" for="loginRole">Account role</label>
+          <select id="loginRole" class="compact-field" aria-label="Account role">
+            <option value="admin">Farmer</option>
+            <option value="vet">Veterinarian</option>
+          </select>
+          <label class="visually-hidden" for="adminTokenInput">Account passcode</label>
+          <input id="adminTokenInput" class="compact-field" type="password" autocomplete="current-password" placeholder="Passcode">
+          <button class="small-button" id="loginBtn" type="button">Sign in</button>
+          <button class="small-button" id="logoutBtn" type="button" hidden>Sign out</button>
           <span class="live-dot" id="liveDot"></span>
           <span class="live-label" id="liveStatus">Connecting to backend...</span>
           <div class="avatar">🌱</div>

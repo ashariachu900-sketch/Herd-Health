@@ -26,7 +26,39 @@ let dashboardStats = null;
 let analytics = null;
 let careEvents = [];
 let toastTimer;
+let sessionInfo = null;
 const $ = (id) => document.getElementById(id);
+
+function authHeaders() {
+  return sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {};
+}
+
+function hasAdminSession() {
+  return Boolean(sessionInfo && sessionInfo.role === "admin");
+}
+
+async function restoreSession() {
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
+    if (res.ok) {
+      const info = await res.json();
+      sessionInfo = info.authenticated ? info : null;
+    }
+  } catch {
+    sessionInfo = null;
+  }
+  updateSessionUI();
+}
+
+function updateSessionUI() {
+  $("sessionLabel").textContent = sessionInfo
+    ? `${sessionInfo.actor} · ${sessionInfo.role}`
+    : "Signed out";
+  $("loginBtn").hidden = Boolean(sessionInfo);
+  $("loginRole").hidden = Boolean(sessionInfo);
+  $("adminTokenInput").hidden = Boolean(sessionInfo);
+  $("logoutBtn").hidden = !sessionInfo;
+}
 
 // -----------------------------------------------------------------------------
 // Backend Synchronization & Local Storage Fallback
@@ -199,15 +231,20 @@ function renderInsights() {
 // -----------------------------------------------------------------------------
 async function loadCareEvents() {
   const id = $("eventAnimal")?.value;
-  if (!id) {
+  if (!id || !hasAdminSession()) {
     careEvents = [];
-  } else {
-    try {
-      const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`);
-      careEvents = res.ok ? await res.json() : [];
-    } catch {
-      careEvents = [];
-    }
+    const list = $("eventTimeline");
+    if (list) list.innerHTML = `<div class="empty-state">Sign in as a farmer to view care events.</div>`;
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`, {
+      credentials: "same-origin",
+      headers: authHeaders()
+    });
+    careEvents = res.ok ? await res.json() : [];
+  } catch {
+    careEvents = [];
   }
   const list = $("eventTimeline");
   if (list) {
@@ -241,6 +278,11 @@ async function loadCareData() {
 let lastFocusedElement = null;
 
 async function openModal(animal = null) {
+  if (!hasAdminSession()) {
+    showToast("Sign in as a farmer first.");
+    $("adminTokenInput").focus();
+    return;
+  }
   lastFocusedElement = document.activeElement;
   if (animal) await ensurePhoto(animal);
   $("animalForm").reset();
@@ -640,7 +682,14 @@ document.addEventListener("click", event => {
   if (action === "download-qr") downloadQr(id);
 });
 
-$("openFormButton")?.addEventListener("click", () => openModal());
+$("openFormButton")?.addEventListener("click", () => {
+  if (!hasAdminSession()) {
+    showToast("Sign in as a farmer first.");
+    $("adminTokenInput").focus();
+    return;
+  }
+  openModal();
+});
 $("closeModal")?.addEventListener("click", closeModal);
 $("cancelForm")?.addEventListener("click", closeModal);
 $("animalModal")?.addEventListener("click", event => {
@@ -680,12 +729,17 @@ $("animalForm")?.addEventListener("submit", async event => {
     notes: $("doctorNotes").value.trim(),
     photo
   };
+  if (!hasAdminSession()) {
+    $("formMessage").textContent = "Sign in as a farmer first.";
+    return;
+  }
   const submitBtn = $("animalForm").querySelector("button[type='submit']");
   if (submitBtn) submitBtn.disabled = true;
   try {
     const res = await fetch(existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`, {
       method: existingId ? "PUT" : "POST",
-      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload)
     });
     const data = await res.json().catch(() => ({}));
@@ -708,8 +762,17 @@ $("animalForm")?.addEventListener("submit", async event => {
 async function deleteAnimal(id) {
   const animal = animals.find(a => a.id === id);
   if (!animal || !confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
+  if (!hasAdminSession()) {
+    showToast("Sign in as a farmer first.");
+    $("adminTokenInput").focus();
+    return;
+  }
   try {
-    const res = await fetch(`${API_BASE}/api/animals/${id}`, { method: "DELETE" });
+    const res = await fetch(`${API_BASE}/api/animals/${id}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: authHeaders()
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       showToast(body.error || "Delete failed.");
@@ -726,6 +789,10 @@ async function deleteAnimal(id) {
 $("eventAnimal")?.addEventListener("change", loadCareEvents);
 $("eventForm")?.addEventListener("submit", async event => {
   event.preventDefault();
+  if (!hasAdminSession()) {
+    $("eventMessage").textContent = "Sign in as a farmer first.";
+    return;
+  }
   const animalId = $("eventAnimal").value;
   const payload = {
     type: $("eventType").value,
@@ -740,7 +807,8 @@ $("eventForm")?.addEventListener("submit", async event => {
   try {
     const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animalId)}/events`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload)
     });
     const body = await res.json().catch(() => ({}));
@@ -771,8 +839,62 @@ $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
 });
 $("footerYear").textContent = new Date().getFullYear();
 
+$("loginBtn")?.addEventListener("click", async () => {
+  const token = $("adminTokenInput").value.trim();
+  if (!token) {
+    showToast("Enter the account passcode.");
+    $("adminTokenInput").focus();
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token,
+        operator: $("loginRole").value === "vet" ? "Veterinarian" : "Farmer"
+      })
+    });
+    if (!res.ok) {
+      showToast("Invalid passcode.");
+      return;
+    }
+    sessionInfo = await res.json();
+    if (sessionInfo.role !== $("loginRole").value) {
+      await fetch(`${API_BASE}/api/logout`, { method: "POST", credentials: "same-origin" });
+      sessionInfo = null;
+      updateSessionUI();
+      showToast("The passcode does not match the selected role.");
+      return;
+    }
+    $("adminTokenInput").value = "";
+    updateSessionUI();
+    showToast(`Signed in as ${sessionInfo.actor}.`);
+    if (sessionInfo.role === "vet") {
+      window.location.href = "portal.html";
+    }
+  } catch {
+    showToast("Sign-in failed: backend unavailable.");
+  }
+});
+
+$("logoutBtn")?.addEventListener("click", async () => {
+  try {
+    await fetch(`${API_BASE}/api/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {}
+    });
+  } catch {}
+  sessionInfo = null;
+  updateSessionUI();
+  showToast("Signed out.");
+});
+
 // Initialize app: sync with backend, then render
 (async function init() {
+  await restoreSession();
   await syncAnimals();
   renderAll();
   await hydratePhotos();
