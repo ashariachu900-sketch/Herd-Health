@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY server.py test_server.py backup.py restore.py ./
-COPY index.html portal.html style.css portal.css script.js portal.js test_frontend.html ./
+COPY index.html portal.html style.css portal.css script.js portal.js ./
 COPY vendor/qrcode.min.js vendor/LICENSE.qrcodejs.txt vendor/
 COPY README.md PROJECT_README.md LICENSE .env.example ./
 

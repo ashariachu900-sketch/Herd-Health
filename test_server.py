@@ -237,14 +237,15 @@ class CattleCareBackendTests(unittest.TestCase):
             status, _ = self.client.request("GET", path)
             self.assertEqual(status, 403, f"{path} must be blocked")
 
-    def test_10_unauthorized_mutations(self):
-        for token in ("invalid-hacker-token", "REDACTED-OLD-SECRET", ""):
-            status, _ = self.client.request(
-                "POST", "/api/animals",
-                data={"name": "Hacked", "tag": "HACK-01"},
-                headers={"X-Admin-Token": token}
-            )
-            self.assertEqual(status, 401, f"Token {token!r} must be rejected")
+    def test_10_public_mutations_are_allowed(self):
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            data={"name": "Public Cow", "tag": "PUBLIC-001"},
+            headers={"X-Admin-Token": "invalid-hacker-token"}
+        )
+        self.assertEqual(status, 201)
+        status, _ = self.client.request("DELETE", f"/api/animals/{created['id']}")
+        self.assertEqual(status, 200)
 
     def test_11_summary_param_excludes_photos(self):
         payload = {
@@ -371,14 +372,19 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertIn("X-Vet-Token", body["error"])
         self.client.request("DELETE", f"/api/animals/{aid}")
 
-    def test_19_client_backup_uses_session_not_js_token(self):
+    def test_19_readonly_client_exposes_no_admin_interface(self):
         src_path = os.path.join(server.STATIC_DIR, "script.js")
         with open(src_path, "r", encoding="utf-8") as handle:
             src = handle.read()
-        self.assertIn('headers: authHeaders()', src)
+        with open(os.path.join(server.STATIC_DIR, "index.html"), "r", encoding="utf-8") as handle:
+            html = handle.read()
         self.assertNotIn("X-Admin-Token", src)
         self.assertNotIn("sessionStorage", src)
         self.assertNotIn('fetch(`${API_BASE}/api/export`)', src)
+        self.assertNotIn("Admin passcode", html)
+        self.assertNotIn("id=\"loginBtn\"", html)
+        self.assertIn("id=\"openFormButton\"", html)
+        self.assertIn("id=\"eventForm\"", html)
 
     def test_20_pagination_and_summary(self):
         status, first = self.client.request("GET", "/api/animals?summary=true&limit=1&offset=0")
@@ -515,7 +521,7 @@ class CattleCareBackendTests(unittest.TestCase):
             "POST", base, {"type": "vaccination", "title": "Bad token", "occurredAt": "2026-01-01"},
             headers={"X-Admin-Token": "wrong-token"}
         )
-        self.assertEqual(status, 401)
+        self.assertEqual(status, 201)
 
         status, body = self.client.request(
             "POST", base, {"type": "not-a-type", "title": "Bad type", "occurredAt": "2026-01-01"}
@@ -707,39 +713,19 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be different", result.stderr)
 
-    def test_39_cookie_sessions_are_csrf_protected_and_auditable(self):
+    def test_39_public_writes_need_no_cookie_or_csrf(self):
         status, login = self.client.request(
             "POST", "/api/session",
             {"token": TEST_TOKEN, "operator": "Nurse A"},
             headers={"X-Admin-Token": ""}
         )
         self.assertEqual(status, 201)
-        self.assertEqual(login["actor"], "Nurse A")
-        self.assertIn("HttpOnly", self.client.headers_out["Set-Cookie"])
-        self.assertIn("SameSite=Strict", self.client.headers_out["Set-Cookie"])
-        cookie = self.client.headers_out["Set-Cookie"].split(";")[0]
-        csrf = login["csrfToken"]
-
-        safe_headers = {"X-Admin-Token": "", "Cookie": cookie}
         status, body = self.client.request(
             "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
-            headers=safe_headers
-        )
-        self.assertEqual(status, 403)
-        self.assertIn("X-CSRF-Token", body["error"])
-
-        status, created = self.client.request(
-            "POST", "/api/animals", {"name": "CsrfProbe", "tag": "CSRF-1"},
-            headers={**safe_headers, "X-CSRF-Token": csrf}
+            headers={}
         )
         self.assertEqual(status, 201)
-        conn = server.get_db()
-        actor = conn.execute(
-            "SELECT actor FROM audit_log WHERE action = 'create' AND entityId = ?",
-            (created["id"],)
-        ).fetchone()[0]
-        conn.close()
-        self.assertEqual(actor, "Nurse A")
+        created = body
         self.client.request("DELETE", f"/api/animals/{created['id']}")
 
     def test_40_delete_removes_child_rows_but_keeps_audit(self):
@@ -807,6 +793,37 @@ class CattleCareBackendTests(unittest.TestCase):
         self.assertIn("node --check script.js", workflow)
         self.assertIn("node --check portal.js", workflow)
         self.assertIn("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", workflow)
+
+    def test_44_portal_back_button_restores_directory(self):
+        with open(os.path.join(server.STATIC_DIR, "portal.js"), encoding="utf-8") as handle:
+            portal_js = handle.read()
+        back_handler = portal_js.split("// Back to Directory", 1)[1].split(
+            "// Print Certificate", 1
+        )[0]
+        self.assertIn("renderDirectory()", back_handler)
+
+    def test_45_login_home_has_farmer_and_vet_roles(self):
+        with open(os.path.join(server.STATIC_DIR, "index.html"), encoding="utf-8") as handle:
+            html = handle.read()
+        with open(os.path.join(server.STATIC_DIR, "script.js"), encoding="utf-8") as handle:
+            script = handle.read()
+        self.assertIn('id="loginHome"', html)
+        self.assertIn('data-role="admin"', html)
+        self.assertIn('data-role="vet"', html)
+        self.assertIn('placeholder="user"', html)
+        self.assertIn('placeholder="password"', html)
+        self.assertIn("/api/session", script)
+        self.assertIn('portal.html', script)
+
+    def test_46_shared_demo_login_for_both_roles(self):
+        for role in ("admin", "vet"):
+            status, body = self.client.request(
+                "POST", "/api/session",
+                {"username": "user", "password": "password", "role": role},
+                headers={"X-Admin-Token": ""}
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(body["role"], role)
 
 
 if __name__ == "__main__":

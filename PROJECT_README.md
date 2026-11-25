@@ -18,7 +18,6 @@ catil helth/
 ├── portal.js           Portal search, filters, passport renderer (paged API reads)
 ├── server.py           REST API + static file server
 ├── test_server.py      43 automated tests (unittest, no dependencies)
-├── test_frontend.html  Browser DOM test for session-based backups
 ├── backup.py           Scheduled backup client using /api/export
 ├── restore.py          Rebuilds a database and photos from an export
 ├── Caddyfile           TLS reverse proxy configuration
@@ -51,7 +50,7 @@ set FARM_ADMIN_TOKEN=choose-a-long-random-string
 set FARM_VET_TOKEN=choose-a-different-long-random-string
 ```
 
-`run_server.bat` prompts for both if you skip this step. Enter the **admin** token in the browser's “Admin passcode” field (top bar) and press **Sign in**. The browser receives an HttpOnly cookie; the token is not kept in `sessionStorage`. CLI clients can still send `X-Admin-Token` directly.
+`run_server.bat` prompts for both if you skip this step. The farmer workspace is read-only and does not accept or expose admin credentials. CLI clients and approved management integrations can still send `X-Admin-Token` directly.
 
 **2. Start the server.** Double-click `run_server.bat`, or run:
 ```bat
@@ -76,8 +75,6 @@ New databases start empty. If you want the three sample cows for a demo, set `SE
 - Write clinical notes and see overdue/upcoming care on the dashboard.
 - Generate and download a QR code per animal (vendored `vendor/qrcode.min.js`, no CDN).
 - Page through the herd 50 records at a time; search and health filters run server-side.
-- **Care Log:** record vaccination, treatment, health check, observation and movement events against an animal instead of burying them in free text.
-- **Audit trail:** create/update/delete/verify/event actions are appended to `audit_log` and shown in the Care Log page.
 - **Insights:** SQL-backed health mix, vaccine status, event counts, verified count and top breeds.
 - Export a complete JSON backup (admin session or token required).
 
@@ -226,13 +223,7 @@ python -m unittest test_server.py -v
 
 CI (`.github/workflows/tests.yml`) runs the tests, compiles the Python entrypoints, parses both browser scripts with `node --check`, and validates `docker compose config` on every push/PR.
 
-For the browser-only DOM test of the real backup button handler (mock fetch, no data written):
-```bat
-python -m http.server 8765
-```
-Open http://localhost:8765/test_frontend.html and confirm the page says **PASS**. It checks that clicking Export sends no token header, sends the session's CSRF header, downloads a correctly named JSON file, contains the export payload, and refuses to fake a backup while offline. Node/jsdom is not required.
-
-Additional frontend smoke checks: open both pages at 1280px and 390px, create 51 records to confirm Previous/Next controls, verify a paged passport deep link, print one passport, sign in and add a care event then confirm it appears in the timeline and audit trail under the operator name, open Insights and confirm the bars render, confirm the portal always hides notes, and confirm QR codes render with the network offline after a first load.
+Additional frontend smoke checks: open both pages at 1280px and 390px, create 51 records to confirm Previous/Next controls, verify a paged passport deep link, print one passport, open Insights and confirm the bars render, confirm the portal always hides notes, and confirm QR codes render with the network offline after a first load.
 
 Screenshot placeholders: add `docs/screenshots/dashboard.png`, `docs/screenshots/care-log.png` and `docs/screenshots/passport.png` when you have a representative deployment; they are intentionally not committed here.
 

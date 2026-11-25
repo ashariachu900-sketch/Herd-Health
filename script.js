@@ -15,102 +15,8 @@ const MS_PER_DAY = 86_400_000;
 /** Only allow small data-URI images to be injected into an <img src>. */
 const SAFE_PHOTO = /^(data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+|\/uploads\/[0-9a-f-]+\.(png|jpg|jpeg|gif|webp))$/;
 
-// -----------------------------------------------------------------------------
-// Session — the passcode is exchanged for an HttpOnly cookie; JS only keeps CSRF
-// -----------------------------------------------------------------------------
-
-let sessionInfo = null; // { role, actor, csrfToken, expiresAt }
-
-async function restoreSession() {
-  try {
-    const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
-    if (res.ok) {
-      const info = await res.json();
-      sessionInfo = info.role ? info : null;
-    }
-  } catch {
-    sessionInfo = null; // Read-only safe view still works offline.
-  }
-  updateSessionUI();
-}
-
-async function loginAdmin() {
-  const input = $("adminTokenInput");
-  const token = (input?.value || "").trim();
-  if (!token) {
-    input?.focus();
-    showToast("Enter the admin passcode in the top bar first.");
-    return;
-  }
-  try {
-    const res = await fetch(`${API_BASE}/api/session`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, operator: ($("operatorInput")?.value || "").trim() })
-    });
-    if (!res.ok) {
-      sessionInfo = null;
-      updateSessionUI();
-      showToast("Wrong admin passcode. Try again.");
-      input?.focus();
-      return;
-    }
-    sessionInfo = await res.json();
-    if (input) input.value = "";
-    updateSessionUI();
-    showToast(`Signed in as ${sessionInfo.actor}. 🌿`);
-    await syncAnimals();
-    renderAll();
-    await hydratePhotos();
-    loadCareData();
-  } catch {
-    showToast("Sign-in failed: backend unavailable.");
-  }
-}
-
-async function logoutAdmin() {
-  const previous = sessionInfo;
-  sessionInfo = null;
-  updateSessionUI();
-  try {
-    await fetch(`${API_BASE}/api/logout`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: previous ? { "X-CSRF-Token": previous.csrfToken } : {}
-    });
-  } catch {
-    // Local state is cleared even if the network is down.
-  }
-  await syncAnimals();
-  renderAll();
-  showToast("Signed out.");
-}
-
-function updateSessionUI() {
-  const label = $("sessionLabel");
-  if (label) label.textContent = sessionInfo ? `${sessionInfo.actor} · admin` : "Read-only view";
-  const login = $("loginBtn");
-  if (login) login.hidden = Boolean(sessionInfo);
-  const logout = $("logoutBtn");
-  if (logout) logout.hidden = !sessionInfo;
-}
-
-function hasAdminSession() {
-  return Boolean(sessionInfo && sessionInfo.role === "admin");
-}
-
-function authHeaders() {
-  return sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {};
-}
-
-/** Forget a rejected session so the user can correct the passcode without reloading. */
-function clearSession() {
-  sessionInfo = null;
-  updateSessionUI();
-  $("adminTokenInput")?.focus();
-}
-
+// This interface is read-only. Write endpoints and backup access remain
+// protected by the backend and are not exposed through passcode controls here.
 const PAGE_SIZE = 50;
 let animals = [];
 let isBackendConnected = false;
@@ -119,8 +25,9 @@ let totalCount = 0;
 let dashboardStats = null;
 let analytics = null;
 let careEvents = [];
-let auditEntries = [];
 let toastTimer;
+let sessionInfo = null;
+let selectedRole = "admin";
 
 const $ = (id) => document.getElementById(id);
 
@@ -292,6 +199,31 @@ function renderInsights() {
   `;
 }
 
+// -----------------------------------------------------------------------------
+async function loadCareEvents() {
+  const id = $("eventAnimal")?.value;
+  if (!id) {
+    careEvents = [];
+  } else {
+    try {
+      const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`);
+      careEvents = res.ok ? await res.json() : [];
+    } catch {
+      careEvents = [];
+    }
+  }
+  const list = $("eventTimeline");
+  if (list) {
+    list.innerHTML = careEvents.length ? careEvents.map(event => `
+      <div class="event-item">
+        <strong>${escapeHTML(event.title)}</strong>
+        <small>${escapeHTML(event.type.replaceAll("_", " "))} · ${escapeHTML(event.occurredAt)} · ${escapeHTML(event.actor)}</small>
+        ${event.details ? `<div>${escapeHTML(event.details)}</div>` : ""}
+      </div>
+    `).join("") : `<div class="empty-state">No care events recorded.</div>`;
+  }
+}
+
 async function loadCareData() {
   const select = $("eventAnimal");
   if (!select) return;
@@ -307,73 +239,63 @@ async function loadCareData() {
     select.innerHTML = `<option value="">Backend unavailable</option>`;
   }
   await loadCareEvents();
-  await loadAudit();
 }
 
-async function loadCareEvents() {
-  const id = $("eventAnimal")?.value;
-  if (!id || !hasAdminSession()) {
-    careEvents = [];
-    renderEvents();
-    return;
-  }
-  try {
-    const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(id)}/events`, {
-      credentials: "same-origin",
-      headers: authHeaders()
-    });
-    if (res.status === 401) { clearSession(); return; }
-    careEvents = res.ok ? await res.json() : [];
-  } catch {
-    careEvents = [];
-  }
-  renderEvents();
+let lastFocusedElement = null;
+
+async function openModal(animal = null) {
+  lastFocusedElement = document.activeElement;
+  if (animal) await ensurePhoto(animal);
+  $("animalForm").reset();
+  $("animalId").value = animal?.id || "";
+  $("modalTitle").textContent = animal ? "Update cattle details" : "Register cattle";
+  $("animalName").value = animal?.name || "";
+  $("animalTag").value = animal?.tag || "";
+  $("animalBreed").value = animal?.breed || "";
+  $("animalDob").value = animal?.dob || "";
+  $("animalHealth").value = animal?.health || "Healthy";
+  $("lastVaccineDate").value = animal?.lastVaccineDate || "";
+  $("vaccineName").value = animal?.vaccineName || "";
+  $("nextVaccineDate").value = animal?.nextVaccineDate || "";
+  $("doctorNotes").value = animal?.notes || "";
+  $("formMessage").textContent = "";
+  $("animalModal").classList.add("open");
+  $("animalModal").setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  $("animalName").focus();
 }
 
-function renderEvents() {
-  const list = $("eventTimeline");
-  if (!list) return;
-  list.innerHTML = careEvents.length ? careEvents.map(event => `
-    <div class="event-item">
-      <strong>${escapeHTML(event.title)}</strong>
-      <small>${escapeHTML(event.type.replaceAll("_", " "))} · ${escapeHTML(event.occurredAt)} · ${escapeHTML(event.actor)}</small>
-      ${event.details ? `<div>${escapeHTML(event.details)}</div>` : ""}
-    </div>
-  `).join("") : `<div class="empty-state">🌱 No care events recorded for this animal.</div>`;
+function closeModal() {
+  $("animalModal").classList.remove("open");
+  $("animalModal").setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  lastFocusedElement?.focus();
+  lastFocusedElement = null;
 }
 
-async function loadAudit() {
-  const list = $("auditList");
-  if (!list || !hasAdminSession()) {
-    auditEntries = [];
-    renderAudit();
-    return;
-  }
-  try {
-    const res = await fetch(`${API_BASE}/api/audit`, {
-      credentials: "same-origin",
-      headers: authHeaders()
-    });
-    if (res.status === 401) { clearSession(); return; }
-    auditEntries = res.ok ? await res.json() : [];
-  } catch {
-    auditEntries = [];
-  }
-  renderAudit();
+function resizePhoto(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) return resolve("");
+    if (!file.type.startsWith("image/")) return reject(new Error("Please choose an image file."));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read the image."));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("Could not process the image."));
+      image.onload = () => {
+        const scale = Math.min(1, 850 / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(image.width * scale);
+        canvas.height = Math.round(image.height * scale);
+        canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.76));
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
-function renderAudit() {
-  const list = $("auditList");
-  if (!list) return;
-  list.innerHTML = auditEntries.length ? auditEntries.slice(0, 30).map(entry => `
-    <div class="audit-item">
-      <strong>${escapeHTML(entry.action)}</strong> — ${escapeHTML(entry.summary)}
-      <small>${escapeHTML(entry.createdAt)} · ${escapeHTML(entry.actor)}</small>
-    </div>
-  `).join("") : `<div class="empty-state">No audited actions yet.</div>`;
-}
-
-// -----------------------------------------------------------------------------
 // Utilities & Formatting
 // -----------------------------------------------------------------------------
 
@@ -418,220 +340,6 @@ function showToast(message) {
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2800);
-}
-
-// -----------------------------------------------------------------------------
-// Modal & Image Processing
-// -----------------------------------------------------------------------------
-
-let lastFocusedElement = null;
-
-async function openModal(animal = null) {
-  lastFocusedElement = document.activeElement;
-  if (animal) await ensurePhoto(animal);
-  $("animalForm").reset();
-  $("animalId").value = animal?.id || "";
-  $("modalTitle").textContent = animal ? "Update cattle details" : "Register cattle";
-  $("animalName").value = animal?.name || "";
-  $("animalTag").value = animal?.tag || "";
-  $("animalBreed").value = animal?.breed || "";
-  $("animalDob").value = animal?.dob || "";
-  $("animalHealth").value = animal?.health || "Healthy";
-  $("lastVaccineDate").value = animal?.lastVaccineDate || "";
-  $("vaccineName").value = animal?.vaccineName || "";
-  $("nextVaccineDate").value = animal?.nextVaccineDate || "";
-  $("doctorNotes").value = animal?.notes || "";
-  $("formMessage").textContent = "";
-  $("animalModal").classList.add("open");
-  $("animalModal").setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
-  $("animalName").focus();
-}
-
-function closeModal() {
-  $("animalModal").classList.remove("open");
-  $("animalModal").setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
-  if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
-    lastFocusedElement.focus();
-  }
-  lastFocusedElement = null;
-}
-
-function resizePhoto(file) {
-  return new Promise((resolve, reject) => {
-    if (!file) return resolve("");
-    if (!file.type.startsWith("image/")) {
-      return reject(new Error("Please choose an image file."));
-    }
-
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Could not read the image."));
-    reader.onload = () => {
-      const image = new Image();
-      image.onerror = () => reject(new Error("Could not process the image."));
-      image.onload = () => {
-        const maxSize = 850;
-        const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(image.width * scale);
-        canvas.height = Math.round(image.height * scale);
-        const context = canvas.getContext("2d");
-        context.drawImage(image, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.76));
-      };
-      image.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-// -----------------------------------------------------------------------------
-// Form Handling (Create / Update via REST API)
-// -----------------------------------------------------------------------------
-
-$("animalForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const existingId = $("animalId").value;
-  const existing = animals.find(animal => animal.id === existingId);
-  const tag = $("animalTag").value.trim();
-  const name = $("animalName").value.trim();
-
-  if (!name || !tag) {
-    $("formMessage").textContent = "Animal name and ID are required.";
-    return;
-  }
-
-  // Client-side duplicate check
-  const duplicate = animals.some(animal =>
-    animal.tag.toLowerCase() === tag.toLowerCase() && animal.id !== existingId
-  );
-
-  if (duplicate) {
-    $("formMessage").textContent = "This animal ID is already registered.";
-    return;
-  }
-
-  const photoFile = $("animalPhoto").files[0];
-  let photo = existing?.photo || "";
-
-  try {
-    if (photoFile) photo = await resizePhoto(photoFile);
-  } catch (error) {
-    $("formMessage").textContent = error.message;
-    return;
-  }
-
-  const payload = {
-    name,
-    tag,
-    breed: $("animalBreed").value.trim(),
-    dob: $("animalDob").value,
-    health: $("animalHealth").value,
-    lastVaccineDate: $("lastVaccineDate").value,
-    vaccineName: $("vaccineName").value.trim(),
-    nextVaccineDate: $("nextVaccineDate").value,
-    notes: $("doctorNotes").value.trim(),
-    photo
-  };
-
-  if (!hasAdminSession()) {
-    $("formMessage").textContent = "Sign in with the admin passcode first.";
-    $("adminTokenInput")?.focus();
-    return;
-  }
-
-  // Offline writes are disabled on purpose: a local-only edit would be silently
-  // overwritten by syncAnimals() when the server comes back.
-  if (!isBackendConnected) {
-    $("formMessage").textContent = "Offline: saving is disabled so records cannot be lost.";
-    return;
-  }
-
-  const submitBtn = $("animalForm").querySelector("button[type='submit']");
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    // Session cookie authenticates; the CSRF header proves this page initiated the write.
-    const url = existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`;
-    const method = existingId ? "PUT" : "POST";
-
-    const res = await fetch(url, {
-      method,
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await res.json();
-    if (res.status === 401) {
-      clearSession();
-      $("formMessage").textContent = "Wrong admin passcode. Re-enter it and try again.";
-      return;
-    }
-    if (!res.ok) {
-      $("formMessage").textContent = data.error || "Failed to save animal record.";
-      return;
-    }
-
-    await syncAnimals(currentPage);
-    renderAll();
-    await hydratePhotos();
-
-    closeModal();
-    renderAll();
-    showToast(existing ? "Cattle details updated 🌿" : "New cattle registered successfully 🌱");
-  } catch (err) {
-    $("formMessage").textContent = "Error saving animal: " + err.message;
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-  }
-});
-
-// -----------------------------------------------------------------------------
-// Deleting an Animal
-// -----------------------------------------------------------------------------
-
-async function deleteAnimal(id) {
-  const animal = animals.find(a => a.id === id);
-  if (!animal) return;
-
-  if (!confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
-
-  if (!isBackendConnected) {
-    showToast("Offline: deleting is disabled so records cannot be lost.");
-    return;
-  }
-  if (!hasAdminSession()) {
-    showToast("Sign in with the admin passcode first.");
-    $("adminTokenInput")?.focus();
-    return;
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/api/animals/${id}`, {
-      method: "DELETE",
-      credentials: "same-origin",
-      headers: authHeaders()
-    });
-    if (res.status === 401) {
-      clearSession();
-      showToast("Wrong admin passcode. Re-enter it and try again.");
-      return;
-    }
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      showToast("Delete failed: " + (errData.error || "Server error"));
-      return;
-    }
-    await syncAnimals(currentPage);
-    renderAll();
-    await hydratePhotos();
-    showToast("Animal record deleted from database.");
-  } catch (e) {
-    showToast("Network error deleting animal: " + e.message);
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -892,41 +600,6 @@ document.querySelectorAll("[data-go]").forEach(button => {
   button.addEventListener("click", () => showPage(button.dataset.go));
 });
 
-// Modal controls
-$("openFormButton").addEventListener("click", () => openModal());
-$("closeModal").addEventListener("click", closeModal);
-$("cancelForm").addEventListener("click", closeModal);
-
-$("animalModal").addEventListener("click", event => {
-  if (event.target === $("animalModal")) closeModal();
-});
-
-document.addEventListener("keydown", event => {
-  const modal = $("animalModal");
-  if (!modal.classList.contains("open")) return;
-
-  if (event.key === "Escape") {
-    closeModal();
-    return;
-  }
-
-  // Keep Tab focus inside the dialog while it is open.
-  if (event.key === "Tab") {
-    const focusable = [...modal.querySelectorAll("button, input, select, textarea, a[href]")]
-      .filter(el => !el.disabled && el.offsetParent !== null);
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-});
-
 // Cattle search and filtering now run on the server so paging stays correct.
 let reloadTimer;
 function reloadPage() {
@@ -970,112 +643,127 @@ document.addEventListener("click", event => {
   if (action === "download-qr") downloadQr(id);
 });
 
-$("eventAnimal")?.addEventListener("change", loadCareEvents);
-$("eventForm")?.addEventListener("submit", async (event) => {
+$("openFormButton")?.addEventListener("click", () => openModal());
+$("closeModal")?.addEventListener("click", closeModal);
+$("cancelForm")?.addEventListener("click", closeModal);
+$("animalModal")?.addEventListener("click", event => {
+  if (event.target === $("animalModal")) closeModal();
+});
+
+$("animalForm")?.addEventListener("submit", async event => {
   event.preventDefault();
-  const message = $("eventMessage");
-  if (!hasAdminSession()) {
-    if (message) message.textContent = "Sign in with the admin passcode first.";
+  const existingId = $("animalId").value;
+  const existing = animals.find(animal => animal.id === existingId);
+  const name = $("animalName").value.trim();
+  const tag = $("animalTag").value.trim();
+  if (!name || !tag) {
+    $("formMessage").textContent = "Animal name and ID are required.";
     return;
   }
+  if (animals.some(animal => animal.tag.toLowerCase() === tag.toLowerCase() && animal.id !== existingId)) {
+    $("formMessage").textContent = "This animal ID is already registered.";
+    return;
+  }
+  let photo = existing?.photo || "";
+  try {
+    const file = $("animalPhoto").files[0];
+    if (file) photo = await resizePhoto(file);
+  } catch (error) {
+    $("formMessage").textContent = error.message;
+    return;
+  }
+  const payload = {
+    name, tag,
+    breed: $("animalBreed").value.trim(),
+    dob: $("animalDob").value,
+    health: $("animalHealth").value,
+    lastVaccineDate: $("lastVaccineDate").value,
+    vaccineName: $("vaccineName").value.trim(),
+    nextVaccineDate: $("nextVaccineDate").value,
+    notes: $("doctorNotes").value.trim(),
+    photo
+  };
+  const submitBtn = $("animalForm").querySelector("button[type='submit']");
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const res = await fetch(existingId ? `${API_BASE}/api/animals/${existingId}` : `${API_BASE}/api/animals`, {
+      method: existingId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("formMessage").textContent = data.error || "Failed to save animal record.";
+      return;
+    }
+    await syncAnimals(currentPage);
+    renderAll();
+    await hydratePhotos();
+    closeModal();
+    showToast(existing ? "Cattle details updated." : "New cattle registered.");
+  } catch (error) {
+    $("formMessage").textContent = "Error saving animal: " + error.message;
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+});
+
+async function deleteAnimal(id) {
+  const animal = animals.find(a => a.id === id);
+  if (!animal || !confirm(`Delete ${animal.name} (${animal.tag})? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/animals/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || "Delete failed.");
+      return;
+    }
+    await syncAnimals(currentPage);
+    renderAll();
+    showToast("Animal record deleted.");
+  } catch (error) {
+    showToast("Network error deleting animal: " + error.message);
+  }
+}
+
+$("eventAnimal")?.addEventListener("change", loadCareEvents);
+$("eventForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
   const animalId = $("eventAnimal").value;
-  if (!animalId) {
-    message.textContent = "Register an animal first.";
-    return;
-  }
   const payload = {
     type: $("eventType").value,
     title: $("eventTitle").value.trim(),
     occurredAt: $("eventDate").value,
     details: $("eventDetails").value.trim()
   };
-  if (!payload.title || !payload.occurredAt) {
-    message.textContent = "A title and date are required.";
+  if (!animalId || !payload.title || !payload.occurredAt) {
+    $("eventMessage").textContent = "Choose an animal and enter a title and date.";
     return;
   }
   try {
     const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animalId)}/events`, {
       method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-    if (res.status === 401) {
-      clearSession();
-      message.textContent = "Wrong admin passcode. Event not saved.";
-      return;
-    }
+    const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      message.textContent = body.error || "Could not save the event.";
+      $("eventMessage").textContent = body.error || "Could not save the event.";
       return;
     }
     $("eventTitle").value = "";
     $("eventDetails").value = "";
-    message.textContent = "Care event added.";
+    $("eventMessage").textContent = "Care event added.";
     await loadCareEvents();
-    await loadAudit();
-    showToast("Care event recorded. ✎");
   } catch {
-    message.textContent = "Backend unavailable. Event not saved.";
+    $("eventMessage").textContent = "Backend unavailable. Event not saved.";
   }
-});
-
-// Session controls
-$("loginBtn")?.addEventListener("click", loginAdmin);
-$("logoutBtn")?.addEventListener("click", logoutAdmin);
-$("adminTokenInput")?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") loginAdmin();
 });
 
 // Mobile sidebar
 $("menuToggle").addEventListener("click", () => {
   $("sidebar").classList.toggle("open");
 });
-
-// Export full database backup
-const backupBtn = $("exportBackupBtn");
-if (backupBtn) {
-  backupBtn.addEventListener("click", async () => {
-    const download = (data, fileName) => {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    };
-    const dateStr = new Date().toISOString().split("T")[0];
-
-    let res;
-    try {
-      res = await fetch(`${API_BASE}/api/export`, {
-        credentials: "same-origin",
-        headers: authHeaders()
-      });
-    } catch (err) {
-      // The paged local cache holds only the last viewed page. Downloading it
-      // would look like a complete backup while silently omitting other animals.
-      showToast("Offline backup unavailable: connect to the server to export every record.");
-      return;
-    }
-
-    if (res.status === 401) {
-      clearSession();
-      showToast("Wrong admin passcode. Backup not downloaded.");
-      return;
-    }
-    if (!res.ok) {
-      showToast("Server export failed. Backup not downloaded.");
-      return;
-    }
-    download(await res.json(), `cattlecare_backup_${dateStr}.json`);
-    showToast("Herd database backup downloaded! 💾");
-  });
-}
 
 // Initial date setup
 $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
@@ -1086,9 +774,110 @@ $("todayDate").textContent = new Date().toLocaleDateString(undefined, {
 });
 $("footerYear").textContent = new Date().getFullYear();
 
+document.querySelectorAll(".role-card").forEach(card => {
+  card.addEventListener("click", () => {
+    selectedRole = card.dataset.role;
+    document.querySelectorAll(".role-card").forEach(item => {
+      const active = item === card;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-selected", String(active));
+    });
+    $("loginSubmit").textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
+  });
+});
+
+$("loginForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const passcode = $("loginPasscode").value.trim();
+  if (!passcode) {
+    $("loginError").textContent = "Enter your password.";
+    return;
+  }
+  $("loginError").textContent = "";
+  const submitButton = $("loginSubmit");
+  submitButton.disabled = true;
+  submitButton.textContent = "Checking credentials...";
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        token: passcode,
+        username: $("loginRoleName").value.trim(),
+        password: passcode,
+        role: selectedRole,
+        operator: $("loginRoleName").value.trim()
+      })
+    });
+    if (!res.ok) {
+      $("loginError").textContent = "Invalid passcode.";
+      submitButton.disabled = false;
+      submitButton.textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
+      return;
+    }
+    sessionInfo = await res.json();
+    if (selectedRole === "vet") {
+      if (sessionInfo.role !== "vet") {
+        $("loginError").textContent = "This passcode is not for veterinarian access.";
+        submitButton.disabled = false;
+        submitButton.textContent = "Continue as Veterinarian";
+        await fetch(`${API_BASE}/api/logout`, { method: "POST", credentials: "same-origin" });
+        return;
+      }
+      window.location.href = "portal.html";
+      return;
+    }
+    if (sessionInfo.role !== "admin") {
+      $("loginError").textContent = "This passcode is not for farmer access.";
+      submitButton.disabled = false;
+      submitButton.textContent = "Continue as Farmer";
+      await fetch(`${API_BASE}/api/logout`, { method: "POST", credentials: "same-origin" });
+      return;
+    }
+    $("loginPasscode").value = "";
+    showApp();
+  } catch {
+    $("loginError").textContent = "Backend unavailable.";
+    submitButton.disabled = false;
+    submitButton.textContent = `Continue as ${selectedRole === "vet" ? "Veterinarian" : "Farmer"}`;
+  }
+});
+
+$("logoutBtn")?.addEventListener("click", async () => {
+  try {
+    await fetch(`${API_BASE}/api/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: sessionInfo ? { "X-CSRF-Token": sessionInfo.csrfToken } : {}
+    });
+  } catch {}
+  sessionInfo = null;
+  $("appShell").hidden = true;
+  $("loginHome").hidden = false;
+});
+
+function showApp() {
+  $("loginHome").hidden = true;
+  $("appShell").hidden = false;
+  $("sessionLabel").textContent = sessionInfo ? `${sessionInfo.actor} · ${sessionInfo.role}` : "";
+}
+
 // Initialize app: sync with backend, then render
 (async function init() {
-  await restoreSession();
+  try {
+    const res = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
+    if (res.ok) {
+      const restored = await res.json();
+      if (restored.role === "admin") {
+        sessionInfo = restored;
+        showApp();
+      } else if (restored.role === "vet") {
+        window.location.replace("portal.html");
+        return;
+      }
+    }
+  } catch {}
   await syncAnimals();
   renderAll();
   await hydratePhotos();

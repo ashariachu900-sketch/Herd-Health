@@ -11,7 +11,51 @@
   <script src="vendor/qrcode.min.js"></script>
 </head>
 <body>
-  <div class="app-shell">
+  <section class="login-home" id="loginHome" aria-labelledby="loginTitle">
+    <div class="login-scenery" aria-hidden="true">
+      <div class="login-brand scenic-brand"><span>✿</span><strong>CattleCare</strong></div>
+      <div class="sunrise"></div>
+      <div class="field field-back"></div>
+      <div class="field field-front"></div>
+      <div class="scenic-cow">🐄</div>
+      <div class="scenic-copy">
+        <span class="eyebrow">NATURE. HEALTH. TRUST.</span>
+        <h2>One herd.<br><em>Every story cared for.</em></h2>
+      </div>
+    </div>
+    <div class="login-card">
+      <div class="login-mobile-brand"><span>✿</span><strong>CattleCare</strong></div>
+      <div class="login-card-header">
+        <span class="eyebrow">WELCOME BACK</span>
+        <span class="login-step">Secure access</span>
+      </div>
+      <h1 id="loginTitle">How would you<br><em>like to continue?</em></h1>
+      <p class="login-intro">Select your role and sign in to continue.</p>
+      <div class="role-selector" role="tablist" aria-label="Login role">
+        <button type="button" class="role-card active" data-role="admin" role="tab" aria-selected="true">
+          <span class="role-icon">🌱</span><strong>Farmer</strong><small>Manage cattle & care records</small>
+        </button>
+        <button type="button" class="role-card" data-role="vet" role="tab" aria-selected="false">
+          <span class="role-icon">✚</span><strong>Veterinarian</strong><small>Review & verify records</small>
+        </button>
+      </div>
+      <form id="loginForm" class="login-form">
+        <div class="login-field">
+          <label for="loginRoleName">Username</label>
+          <input id="loginRoleName" type="text" maxlength="50" required autocomplete="username" placeholder="user">
+        </div>
+        <div class="login-field">
+          <label for="loginPasscode">Password</label>
+          <input id="loginPasscode" type="password" autocomplete="current-password" required placeholder="password">
+        </div>
+        <p class="login-error" id="loginError" role="alert"></p>
+        <button type="submit" class="primary-button" id="loginSubmit">Continue as Farmer</button>
+      </form>
+      <a class="public-link" href="portal.html">View the public health portal <span>→</span></a>
+    </div>
+  </section>
+
+  <div class="app-shell" id="appShell" hidden>
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="#" aria-label="CattleCare home">
         <span class="brand-mark">✿</span>
@@ -39,9 +83,6 @@
           <p>Healthy animals. A healthier planet.</p>
           <div class="eco-decoration">❧</div>
         </div>
-        <button id="exportBackupBtn" class="backup-button" title="Download full JSON database backup">
-          <span>💾</span> Backup Herd Data
-        </button>
         <div class="sidebar-footer">Made with care <span>♥</span></div>
       </div>
     </aside>
@@ -54,17 +95,8 @@
           <a href="portal.html" target="_blank" class="portal-header-btn" title="Open Public & Vet Inspection Portal">
             <span>🌐</span> Public / Vet Portal ↗
           </a>
-          <span class="session-label" id="sessionLabel">Read-only view</span>
-          <label class="token-field">
-            <span class="visually-hidden">Admin passcode</span>
-            <input id="adminTokenInput" type="password" autocomplete="off" placeholder="Admin passcode" aria-label="Admin passcode">
-          </label>
-          <label class="token-field">
-            <span class="visually-hidden">Operator name</span>
-            <input id="operatorInput" type="text" maxlength="50" autocomplete="name" placeholder="Operator (optional)" aria-label="Operator name for the audit trail">
-          </label>
-          <button class="small-button" id="loginBtn" type="button">Sign in</button>
-          <button class="small-button" id="logoutBtn" type="button" hidden>Sign out</button>
+          <span class="session-label" id="sessionLabel"></span>
+          <button class="small-button" id="logoutBtn" type="button">Sign out</button>
           <span class="live-dot" id="liveDot"></span>
           <span class="live-label" id="liveStatus">Connecting to backend...</span>
           <div class="avatar">🌱</div>
@@ -209,11 +241,9 @@
 
       <section class="page" id="carePage">
         <div class="page-heading">
-          <div><span class="eyebrow">STRUCTURED HISTORY, NOT JUST NOTES</span><h1>Care <em>log.</em></h1><p>Record vaccinations, treatments and observations as events you can actually analyse.</p></div>
+          <div><span class="eyebrow">STRUCTURED HISTORY</span><h1>Care <em>log.</em></h1><p>Record vaccinations, treatments and observations.</p></div>
         </div>
-
         <div class="panel care-entry-panel">
-          <div class="panel-heading"><div><span class="eyebrow">ADD AN EVENT</span><h2>What happened?</h2></div></div>
           <form id="eventForm" class="care-form">
             <select id="eventAnimal" aria-label="Animal"></select>
             <select id="eventType" aria-label="Event type">
@@ -223,26 +253,16 @@
               <option value="observation">Observation</option>
               <option value="movement">Movement</option>
             </select>
-            <label class="visually-hidden" for="eventTitle">Event title</label>
-            <input id="eventTitle" maxlength="80" placeholder="Short title, e.g. Annual FMD booster" aria-label="Event title" required>
-            <label class="visually-hidden" for="eventDate">Event date</label>
-            <input id="eventDate" type="date" aria-label="Event date" required>
-            <label class="visually-hidden" for="eventDetails">Event details</label>
-            <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..." aria-label="Event details"></textarea>
+            <input id="eventTitle" maxlength="80" placeholder="Short title" required>
+            <input id="eventDate" type="date" required>
+            <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..."></textarea>
             <button type="submit" class="primary-button" id="saveEventBtn">＋ Add event</button>
           </form>
           <p class="form-message" id="eventMessage" role="status"></p>
         </div>
-
-        <div class="dashboard-grid">
-          <section class="panel">
-            <div class="panel-heading"><div><span class="eyebrow">PER ANIMAL</span><h2>Care timeline</h2></div></div>
-            <div id="eventTimeline" class="event-timeline"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-heading"><div><span class="eyebrow">ACCOUNTABILITY</span><h2>Audit trail</h2></div></div>
-            <div id="auditList" class="audit-list"></div>
-          </section>
+        <div class="panel">
+          <div class="panel-heading"><h2>Care timeline</h2></div>
+          <div id="eventTimeline" class="event-timeline"></div>
         </div>
       </section>
 
@@ -260,30 +280,29 @@
     </main>
   </div>
 
-  <!-- Registration / edit modal -->
   <div class="modal-backdrop" id="animalModal" aria-hidden="true">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <div class="modal-header">
-        <div><span class="eyebrow">A NEW MEMBER OF THE HERD</span><h2 id="modalTitle">Register cattle</h2></div>
+        <div><span class="eyebrow">HERD RECORD</span><h2 id="modalTitle">Register cattle</h2></div>
         <button class="close-button" id="closeModal" aria-label="Close">×</button>
       </div>
       <form id="animalForm">
         <input type="hidden" id="animalId">
         <div class="form-grid">
-          <div class="field"><label for="animalName">Animal name *</label><input id="animalName" required maxlength="50" placeholder="e.g. Daisy"></div>
-          <div class="field"><label for="animalTag">Animal ID *</label><input id="animalTag" required maxlength="30" placeholder="e.g. COW-001"></div>
-          <div class="field"><label for="animalBreed">Breed</label><input id="animalBreed" maxlength="50" placeholder="e.g. Holstein Friesian"></div>
+          <div class="field"><label for="animalName">Animal name *</label><input id="animalName" required maxlength="50"></div>
+          <div class="field"><label for="animalTag">Animal ID *</label><input id="animalTag" required maxlength="30"></div>
+          <div class="field"><label for="animalBreed">Breed</label><input id="animalBreed" maxlength="50"></div>
           <div class="field"><label for="animalDob">Date of birth</label><input id="animalDob" type="date"></div>
           <div class="field"><label for="animalHealth">Health status</label><select id="animalHealth"><option>Healthy</option><option>Needs attention</option></select></div>
           <div class="field"><label for="lastVaccineDate">Last vaccination date</label><input id="lastVaccineDate" type="date"></div>
-          <div class="field"><label for="vaccineName">Vaccine name</label><input id="vaccineName" maxlength="70" placeholder="e.g. FMD vaccine"></div>
+          <div class="field"><label for="vaccineName">Vaccine name</label><input id="vaccineName" maxlength="70"></div>
           <div class="field"><label for="nextVaccineDate">Next vaccination date</label><input id="nextVaccineDate" type="date"></div>
-          <div class="field full-field"><label for="doctorNotes">Doctor notes</label><textarea id="doctorNotes" rows="3" maxlength="1000" placeholder="Health observations, treatment and notes..."></textarea></div>
-          <div class="field full-field"><label for="animalPhoto">Animal photo</label><input id="animalPhoto" type="file" accept="image/*"><small class="field-hint">Choose a JPG or PNG image. Large photos are resized before saving.</small></div>
+          <div class="field full-field"><label for="doctorNotes">Doctor notes</label><textarea id="doctorNotes" rows="3" maxlength="1000"></textarea></div>
+          <div class="field full-field"><label for="animalPhoto">Animal photo</label><input id="animalPhoto" type="file" accept="image/*"></div>
         </div>
         <div class="form-actions">
           <button type="button" class="secondary-button" id="cancelForm">Cancel</button>
-          <button type="submit" class="primary-button">Save animal <span>↗</span></button>
+          <button type="submit" class="primary-button">Save animal</button>
         </div>
         <p class="form-message" id="formMessage" role="status"></p>
       </form>

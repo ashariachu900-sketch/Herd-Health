@@ -201,6 +201,12 @@
           <span>Certificate generated from CattleCare Farm System</span>
           <span id="certificateTimestamp">Verification status: not verified</span>
         </div>
+        <div id="vetVerifyPanel" class="vet-verify-panel" hidden>
+          <label for="verifiedByName">Veterinarian name</label>
+          <input id="verifiedByName" maxlength="50" placeholder="Enter your name">
+          <button type="button" id="verifyAnimalBtn" class="action-btn">Verify this record</button>
+          <span id="vetVerifyMessage" role="status"></span>
+        </div>
       </article>
     </div>
 

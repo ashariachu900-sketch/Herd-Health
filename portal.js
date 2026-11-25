@@ -22,6 +22,7 @@ let currentPage = 0;
 let totalCount = 0;
 let portalStats = null;
 let toastTimer;
+let vetSession = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -31,6 +32,15 @@ const $ = (id) => document.getElementById(id);
 
 async function init() {
   const urlParams = new URLSearchParams(window.location.search);
+  try {
+    const sessionRes = await fetch(`${API_BASE}/api/session`, { credentials: "same-origin" });
+    if (sessionRes.ok) {
+      const session = await sessionRes.json();
+      vetSession = session.role === "vet" ? session : null;
+    }
+  } catch {
+    vetSession = null;
+  }
   // Public-safe is the only portal view. Full notes/photos live in the farmer
   // workspace behind a session; a scanned tag can never unlock them.
   if ($("publicMode")) $("publicMode").checked = true;
@@ -43,7 +53,7 @@ async function init() {
   const animalTag = urlParams.get("tag");
 
   if (animalTag) {
-    const found = await findAnimal(animalTag, "tag");
+    const found = await findAnimal(animalTag);
     if (found) {
       await showPassport(found);
       return;
@@ -51,7 +61,7 @@ async function init() {
     showMissingRecord(animalTag);
     return;
   } else if (animalId) {
-    const found = await findAnimal(animalId, "id");
+    const found = await findAnimal(animalId);
     if (found) {
       await showPassport(found);
       return;
@@ -144,10 +154,9 @@ async function fetchSafePassport(value) {
 }
 
 /** Direct passport links must work even when the tag is on a later page. */
-async function findAnimal(value, kind) {
+async function findAnimal(value) {
   // The local cache can hold older full records. Never use it for a passport:
   // only /api/passport is allowed to supply the safe fields.
-  void kind;
   return fetchSafePassport(value);
 }
 
@@ -427,6 +436,11 @@ async function showPassport(animal) {
   $("certificateTimestamp").textContent = verified
     ? `Verified at: ${formatDate(String(animal.verifiedAt || "").split("T")[0])} by ${animal.verifiedBy || "a veterinarian"}`
     : "No veterinary verification on file";
+  const verifyPanel = $("vetVerifyPanel");
+  if (verifyPanel) {
+    verifyPanel.hidden = !vetSession || verified;
+    if (vetSession) $("verifyAnimalBtn").dataset.animalId = animal.id;
+  }
 }
 
 function openPassportById(id) {
@@ -439,6 +453,32 @@ function openPassportById(id) {
 // -----------------------------------------------------------------------------
 
 function setupEventListeners() {
+  $("verifyAnimalBtn")?.addEventListener("click", async () => {
+    if (!vetSession) return;
+    const animalId = $("verifyAnimalBtn").dataset.animalId;
+    const verifiedBy = $("verifiedByName").value.trim() || vetSession.actor;
+    if (!animalId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/animals/${encodeURIComponent(animalId)}/verify`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": vetSession.csrfToken
+        },
+        body: JSON.stringify({ verifiedBy })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        $("vetVerifyMessage").textContent = body.error || "Verification failed.";
+        return;
+      }
+      $("vetVerifyMessage").textContent = "Record verified.";
+      await showPassport(body);
+    } catch {
+      $("vetVerifyMessage").textContent = "Backend unavailable.";
+    }
+  });
   // Search and filtering run server-side so paging stays correct.
   let reloadTimer;
   async function refreshDirectory(page = 0) {
@@ -490,6 +530,7 @@ function setupEventListeners() {
   // Back to Directory
   $("backToDirectory").addEventListener("click", () => {
     window.history.pushState({}, "", window.location.pathname);
+    renderDirectory();
     hydratePhotos();
   });
 
@@ -514,11 +555,11 @@ function setupEventListeners() {
     const tag = params.get("tag");
     const id = params.get("id");
     if (tag) {
-      const a = await findAnimal(tag, "tag");
+      const a = await findAnimal(tag);
       if (a) return showPassport(a);
     }
     if (id) {
-      const a = await findAnimal(id, "id");
+      const a = await findAnimal(id);
       if (a) return showPassport(a);
     }
     renderDirectory();
