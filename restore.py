@@ -27,6 +27,7 @@ TABLE_COLUMNS = {
     ),
     "care_events": (
         "id", "animalId", "type", "title", "details", "occurredAt", "createdAt", "actor",
+        "vaccineName",
     ),
     "verification_log": ("id", "animalId", "verifiedBy", "verifiedAt", "actor"),
     "audit_log": ("id", "action", "entityId", "summary", "actor", "createdAt"),

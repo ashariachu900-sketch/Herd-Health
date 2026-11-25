@@ -17,7 +17,7 @@ catil helth/
 ├── portal.css          Portal styles and print stylesheet
 ├── portal.js           Portal search, filters, passport renderer (paged API reads)
 ├── server.py           REST API + static file server
-├── test_server.py      47 automated tests (unittest, no dependencies)
+├── test_server.py      49 automated tests (unittest, no dependencies)
 ├── backup.py           Scheduled backup client using /api/export
 ├── restore.py          Rebuilds a database and photos from an export
 ├── Caddyfile           TLS reverse proxy configuration
@@ -71,6 +71,9 @@ New databases start empty. If you want the three sample cows for a demo, set `SE
 
 ### Farmer Workspace (`index.html`)
 - Register/edit cattle with a resized photo (max 850px, JPEG quality 0.76).
+- New cattle receive server-generated `COW-0001`, `COW-0002`, and subsequent permanent IDs. Existing custom tags are preserved, updates cannot change an ID, and deleting a record never reuses its ID.
+- Cow cards, profiles, QR labels, vaccination records and care events display the same unique ID.
+- Vaccination care events accept a vaccination name and synchronize `vaccineName`, `lastVaccineDate` and optional `nextVaccineDate` on the linked cow.
 - Set health status, vaccine name and last/next vaccination dates.
 - Write clinical notes and see overdue/upcoming care on the dashboard.
 - Generate and download a QR code per animal (vendored `vendor/qrcode.min.js`, no CDN).
@@ -219,7 +222,7 @@ A local backup directory is **not** disaster recovery. Copy the JSON files to en
 ```bat
 python -m unittest test_server.py -v
 ```
-47 tests cover date logic, schema/indexes/migration, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
+49 tests cover date logic, schema/indexes/migration, generated unique tag sequences, vaccination/cow synchronization, list/search/filter endpoints, server-side paging totals, SQL-backed stats, protected CRUD with file-backed photos, care events and audit logs, public-safe passports, backup auth, payload limits, invalid auth and per-IP throttling, unsafe photo rejection, vet-only verification, CSRF sessions, append-only audit triggers, demo-credential rejection, sensitive-route protection and deployment hardening.
 
 CI (`.github/workflows/tests.yml`) runs the tests, compiles the Python entrypoints, parses both browser scripts with `node --check`, and validates `docker compose config` on every push/PR.
 

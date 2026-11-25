@@ -251,7 +251,7 @@ async function loadCareEvents() {
     list.innerHTML = careEvents.length ? careEvents.map(event => `
       <div class="event-item">
         <strong>${escapeHTML(event.title)}</strong>
-        <small>${escapeHTML(event.type.replaceAll("_", " "))} · ${escapeHTML(event.occurredAt)} · ${escapeHTML(event.actor)}</small>
+        <small>${escapeHTML(event.animalTag || "")} · ${escapeHTML(event.animalName || "")} · ${escapeHTML(event.vaccineName || "No vaccination name")} · ${escapeHTML(event.type.replaceAll("_", " "))} · ${escapeHTML(event.occurredAt)} · ${escapeHTML(event.actor)}</small>
         ${event.details ? `<div>${escapeHTML(event.details)}</div>` : ""}
       </div>
     `).join("") : `<div class="empty-state">No care events recorded.</div>`;
@@ -266,7 +266,7 @@ async function loadCareData() {
     const res = await fetch(`${API_BASE}/api/animals?summary=true&limit=200`);
     const list = res.ok ? await res.json() : animals;
     select.innerHTML = list.length
-      ? list.map(a => `<option value="${escapeHTML(a.id)}">${escapeHTML(a.tag)} — ${escapeHTML(a.name)}</option>`).join("")
+      ? list.map(a => `<option value="${escapeHTML(a.id)}">${escapeHTML(a.tag)} — ${escapeHTML(a.name)} — ${escapeHTML(a.vaccineName || "No vaccine name")}</option>`).join("")
       : `<option value="">No animals registered</option>`;
     if (list.some(a => a.id === previous)) select.value = previous;
   } catch {
@@ -290,6 +290,7 @@ async function openModal(animal = null) {
   $("modalTitle").textContent = animal ? "Update cattle details" : "Register cattle";
   $("animalName").value = animal?.name || "";
   $("animalTag").value = animal?.tag || "";
+  $("animalTag").placeholder = animal ? "" : "Generated automatically";
   $("animalBreed").value = animal?.breed || "";
   $("animalDob").value = animal?.dob || "";
   $("animalHealth").value = animal?.health || "Healthy";
@@ -473,6 +474,7 @@ function renderCattle() {
       <div class="animal-details">
         <h3>${escapeHTML(animal.name)}</h3>
         <div class="animal-meta">${escapeHTML(animal.tag)} · ${escapeHTML(animal.breed || "Breed not set")}</div>
+        <div class="animal-meta"><strong>Vaccination:</strong> ${escapeHTML(animal.vaccineName || "Not recorded")}</div>
         <div class="animal-notes">${escapeHTML(animal.notes || "No doctor notes have been added.")}</div>
         <div class="animal-meta">Next vaccine: ${formatDate(animal.nextVaccineDate)}</div>
         <div class="animal-actions">
@@ -510,7 +512,7 @@ function renderVaccinations() {
     if (animal.lastVaccineDate && status === "none") { label = "Recorded"; className = "done"; }
 
     return `<tr>
-      <td><strong>${escapeHTML(animal.name)}</strong><br><span class="animal-meta">${escapeHTML(animal.tag)}</span></td>
+      <td><strong>${escapeHTML(animal.name)}</strong><br><span class="animal-meta">${escapeHTML(animal.tag)} · ${escapeHTML(animal.vaccineName || "No vaccine name")}</span></td>
       <td>${escapeHTML(animal.vaccineName || "—")}</td>
       <td>${formatDate(animal.lastVaccineDate)}</td>
       <td>${formatDate(animal.nextVaccineDate)}</td>
@@ -538,7 +540,7 @@ function renderQrCodes() {
     <article class="qr-card" data-qr-card="${escapeHTML(animal.id)}">
       <div class="eyebrow">CATTLECARE DIGITAL ID</div>
       <h3>${escapeHTML(animal.name)}</h3>
-      <p>${escapeHTML(animal.tag)} · ${escapeHTML(animal.breed || "Breed not set")}</p>
+      <p>${escapeHTML(animal.tag)} · ${escapeHTML(animal.vaccineName || "No vaccine name")} · ${escapeHTML(animal.breed || "Breed not set")}</p>
       <div class="qr-image" id="qr-${escapeHTML(animal.id)}"></div>
       <button class="small-button" data-action="download-qr" data-id="${escapeHTML(animal.id)}">↓ Download QR code</button>
     </article>
@@ -619,7 +621,7 @@ function downloadQr(id) {
   const link = document.createElement("a");
   const safeName = animal.tag.replace(/[^a-z0-9_-]/gi, "_");
   link.href = dataUrl;
-  link.download = `${safeName}_QR_Code.png`;
+  link.download = `${safeName}_${animal.vaccineName ? animal.vaccineName.replace(/[^a-z0-9_-]/gi, "_") : "No_Vaccine"}_QR_Code.png`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -701,13 +703,8 @@ $("animalForm")?.addEventListener("submit", async event => {
   const existingId = $("animalId").value;
   const existing = animals.find(animal => animal.id === existingId);
   const name = $("animalName").value.trim();
-  const tag = $("animalTag").value.trim();
-  if (!name || !tag) {
-    $("formMessage").textContent = "Animal name and ID are required.";
-    return;
-  }
-  if (animals.some(animal => animal.tag.toLowerCase() === tag.toLowerCase() && animal.id !== existingId)) {
-    $("formMessage").textContent = "This animal ID is already registered.";
+  if (!name) {
+    $("formMessage").textContent = "Animal name is required.";
     return;
   }
   let photo = existing?.photo || "";
@@ -719,7 +716,8 @@ $("animalForm")?.addEventListener("submit", async event => {
     return;
   }
   const payload = {
-    name, tag,
+    name,
+    tag: existing?.tag || "",
     breed: $("animalBreed").value.trim(),
     dob: $("animalDob").value,
     health: $("animalHealth").value,
@@ -797,7 +795,9 @@ $("eventForm")?.addEventListener("submit", async event => {
   const payload = {
     type: $("eventType").value,
     title: $("eventTitle").value.trim(),
+    vaccineName: $("eventVaccineName")?.value.trim() || "",
     occurredAt: $("eventDate").value,
+    nextVaccineDate: $("eventNextVaccineDate")?.value || "",
     details: $("eventDetails").value.trim()
   };
   if (!animalId || !payload.title || !payload.occurredAt) {

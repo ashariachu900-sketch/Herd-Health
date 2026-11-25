@@ -253,6 +253,47 @@ def ensure_columns(conn):
         if name not in existing:
             conn.execute(f"ALTER TABLE animals ADD COLUMN {name} {definition}")
 
+def ensure_sequence_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_sequences (
+            name TEXT PRIMARY KEY,
+            nextValue INTEGER NOT NULL
+        )
+    """)
+    row = conn.execute(
+        "SELECT nextValue FROM app_sequences WHERE name = 'animal_tag'"
+    ).fetchone()
+    if row:
+        return
+    max_number = 0
+    for animal in conn.execute("SELECT tag FROM animals").fetchall():
+        match = re.fullmatch(r"COW-(\d+)", str(animal["tag"] or ""), re.IGNORECASE)
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+    conn.execute(
+        "INSERT INTO app_sequences (name, nextValue) VALUES ('animal_tag', ?)",
+        (max_number + 1,)
+    )
+
+def generate_animal_tag(cursor):
+    row = cursor.execute(
+        "SELECT nextValue FROM app_sequences WHERE name = 'animal_tag'"
+    ).fetchone()
+    number = int(row["nextValue"]) if row else 1
+    while True:
+        tag = f"COW-{number:04d}"
+        collision = cursor.execute(
+            "SELECT 1 FROM animals WHERE LOWER(tag) = LOWER(?)", (tag,)
+        ).fetchone()
+        if not collision:
+            break
+        number += 1
+    cursor.execute(
+        "UPDATE app_sequences SET nextValue = ? WHERE name = 'animal_tag'",
+        (number + 1,)
+    )
+    return tag
+
 def init_db():
     # Support deployment paths such as /app/data/cattlecare.db on a fresh volume.
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -282,6 +323,7 @@ def init_db():
         )
     """)
     ensure_columns(conn)
+    ensure_sequence_table(conn)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS verification_log (
@@ -324,6 +366,12 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (createdAt DESC);")
         conn.execute("PRAGMA user_version = 2")
+
+    care_event_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(care_events)")
+    }
+    if "vaccineName" not in care_event_columns:
+        conn.execute("ALTER TABLE care_events ADD COLUMN vaccineName TEXT")
 
     # The audit trail is append-only at the storage layer, not just by convention.
     # Created on every startup so databases migrated by an earlier version also
@@ -475,8 +523,8 @@ def clean_animal_fields(data):
             return None, f"{key} must be {limit} characters or fewer."
         fields[key] = value
 
-    if not fields["name"] or not fields["tag"]:
-        return None, "Animal name and ID/tag are required."
+    if not fields["name"]:
+        return None, "Animal name is required."
 
     fields["health"] = str(data.get("health") or "Healthy")
     if fields["health"] not in HEALTH_VALUES:
@@ -841,8 +889,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json(404, {"error": "Animal not found"})
                 return
             rows = conn.execute("""
-                SELECT * FROM care_events WHERE animalId = ?
-                ORDER BY occurredAt DESC, id DESC LIMIT 100
+                SELECT e.*, a.name AS animalName, a.tag AS animalTag,
+                       COALESCE(e.vaccineName, a.vaccineName) AS vaccineName
+                FROM care_events e
+                JOIN animals a ON a.id = e.animalId
+                WHERE e.animalId = ?
+                ORDER BY e.occurredAt DESC, e.id DESC LIMIT 100
             """, (record["id"],)).fetchall()
             conn.close()
             self.send_json(200, [dict(r) for r in rows])
@@ -1028,16 +1080,22 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             title = str(data.get("title") or "").strip()[:80]
             details = str(data.get("details") or "").strip()[:500]
             occurred = str(data.get("occurredAt") or "").strip()
+            vaccine_name = str(data.get("vaccineName") or "").strip()[:70]
+            next_vaccine = str(data.get("nextVaccineDate") or "").strip()
             if event_type not in EVENT_TYPES:
                 self.send_json(400, {"error": "Invalid event type."})
                 return
             if not title or not valid_iso_date(occurred):
                 self.send_json(400, {"error": "title and a valid occurredAt date are required."})
                 return
+            if next_vaccine and not valid_iso_date(next_vaccine):
+                self.send_json(400, {"error": "nextVaccineDate must be a valid YYYY-MM-DD date or empty."})
+                return
             conn = get_db()
             cursor = conn.cursor()
             record = cursor.execute(
-                "SELECT id FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)", (animal_id, animal_id)
+                "SELECT id, name, tag, vaccineName FROM animals WHERE id = ? OR LOWER(tag) = LOWER(?)",
+                (animal_id, animal_id)
             ).fetchone()
             if not record:
                 conn.close()
@@ -1045,10 +1103,31 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 return
             actor = actor_for(self, "farmer")
             created_at = datetime.datetime.now().isoformat()
+            linked_vaccine_name = vaccine_name or (title if event_type == "vaccination" else "")
             cursor.execute("""
-                INSERT INTO care_events (animalId, type, title, details, occurredAt, createdAt, actor)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (record["id"], event_type, title, details, occurred, created_at, actor))
+                INSERT INTO care_events (
+                    animalId, type, title, details, occurredAt, createdAt, actor, vaccineName
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record["id"], event_type, title, details, occurred, created_at, actor,
+                linked_vaccine_name
+            ))
+            if event_type == "vaccination":
+                cursor.execute("""
+                    UPDATE animals
+                    SET vaccineName = ?,
+                        lastVaccineDate = ?,
+                        nextVaccineDate = CASE WHEN ? <> '' THEN ? ELSE nextVaccineDate END
+                    WHERE id = ?
+                """, (
+                    linked_vaccine_name,
+                    occurred,
+                    next_vaccine,
+                    next_vaccine,
+                    record["id"]
+                ))
+                STATS_CACHE.clear()
             write_audit(conn, "event", record["id"], f"{event_type}: {title}", actor)
             conn.commit()
             event_id = cursor.lastrowid
@@ -1056,7 +1135,9 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
             self.send_json(201, {
                 "id": event_id, "animalId": record["id"], "type": event_type,
                 "title": title, "details": details, "occurredAt": occurred,
-                "createdAt": created_at, "actor": actor
+                "createdAt": created_at, "actor": actor,
+                "animalName": record["name"], "animalTag": record["tag"],
+                "vaccineName": linked_vaccine_name
             })
             return
 
@@ -1119,22 +1200,30 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
 
             conn = get_db()
             cursor = conn.cursor()
-
-            # Reject a duplicate tag before writing a photo file that would be orphaned.
-            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?)", (fields["tag"],))
-            if cursor.fetchone():
-                conn.close()
-                self.send_json(409, {"error": f"Animal ID '{fields['tag']}' is already registered."})
-                return
-
             try:
-                photo_path = persist_photo(fields["photo"])
-            except (ValueError, OSError) as exc:
-                conn.close()
-                self.send_json(400, {"error": f"Could not store photo: {exc}"})
-                return
+                cursor.execute("BEGIN IMMEDIATE")
+                supplied_tag = str(fields["tag"] or "").strip()
+                if supplied_tag:
+                    collision = cursor.execute(
+                        "SELECT 1 FROM animals WHERE LOWER(tag) = LOWER(?)", (supplied_tag,)
+                    ).fetchone()
+                    if collision:
+                        conn.rollback()
+                        conn.close()
+                        self.send_json(409, {"error": f"Animal ID '{supplied_tag}' is already registered."})
+                        return
+                    animal_tag = supplied_tag
+                else:
+                    animal_tag = generate_animal_tag(cursor)
 
-            try:
+                try:
+                    photo_path = persist_photo(fields["photo"])
+                except (ValueError, OSError) as exc:
+                    conn.rollback()
+                    conn.close()
+                    self.send_json(400, {"error": f"Could not store photo: {exc}"})
+                    return
+
                 cursor.execute("""
                     INSERT INTO animals (
                         id, name, tag, breed, dob, health,
@@ -1143,12 +1232,12 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     animal_id,
-                    fields["name"], fields["tag"], fields["breed"], fields["dob"],
+                    fields["name"], animal_tag, fields["breed"], fields["dob"],
                     fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
                     fields["nextVaccineDate"], fields["notes"], photo_path, created_at
                 ))
                 write_audit(conn, "create", animal_id,
-                            f"Registered {fields['name']} ({fields['tag']})",
+                            f"Registered {fields['name']} ({animal_tag})",
                             actor_for(self, "farmer"))
                 conn.commit()
                 STATS_CACHE.clear()
@@ -1199,14 +1288,8 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             real_id = current["id"]
-
-            # Check duplicate tag against other animals
-            cursor.execute("SELECT id FROM animals WHERE LOWER(tag) = LOWER(?) AND id != ?", (fields["tag"], real_id))
-            duplicate = cursor.fetchone()
-            if duplicate:
-                conn.close()
-                self.send_json(409, {"error": f"Animal ID '{fields['tag']}' is already registered to another animal."})
-                return
+            # Tags are permanent identifiers: edits never change or regenerate them.
+            animal_tag = current["tag"]
 
             # Keep existing photo if new photo is empty or omitted; verification is never overwritten here.
             try:
@@ -1230,7 +1313,7 @@ class CattleRequestHandler(SimpleHTTPRequestHandler):
                     photo = ?
                 WHERE id = ?
             """, (
-                fields["name"], fields["tag"], fields["breed"], fields["dob"],
+                fields["name"], animal_tag, fields["breed"], fields["dob"],
                 fields["health"], fields["lastVaccineDate"], fields["vaccineName"],
                 fields["nextVaccineDate"], fields["notes"], photo_to_save, real_id
             ))

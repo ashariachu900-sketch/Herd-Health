@@ -841,6 +841,75 @@ class CattleCareBackendTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
+    def test_48_generated_tags_are_unique_and_not_reused(self):
+        status, first = self.client.request(
+            "POST", "/api/animals",
+            {"name": "Generated One", "tag": "", "health": "Healthy"}
+        )
+        self.assertEqual(status, 201)
+        self.assertRegex(first["tag"], r"^COW-\d{4}$")
+
+        status, second = self.client.request(
+            "POST", "/api/animals",
+            {"name": "Generated Two", "health": "Healthy"}
+        )
+        self.assertEqual(status, 201)
+        self.assertRegex(second["tag"], r"^COW-\d{4}$")
+        self.assertNotEqual(first["tag"], second["tag"])
+
+        deleted_tag = first["tag"]
+        self.client.request("DELETE", f"/api/animals/{first['id']}")
+        status, third = self.client.request(
+            "POST", "/api/animals",
+            {"name": "Generated Three", "health": "Healthy"}
+        )
+        self.assertEqual(status, 201)
+        self.assertNotEqual(third["tag"], deleted_tag)
+
+        status, updated = self.client.request(
+            "PUT", f"/api/animals/{third['id']}",
+            {"name": "Generated Three Updated", "tag": "MUST-NOT-CHANGE",
+             "health": "Healthy"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["tag"], third["tag"])
+        self.client.request("DELETE", f"/api/animals/{second['id']}")
+        self.client.request("DELETE", f"/api/animals/{third['id']}")
+
+    def test_49_vaccination_event_syncs_cow_vaccine_details(self):
+        status, created = self.client.request(
+            "POST", "/api/animals",
+            {"name": "Vaccine Cow", "health": "Healthy"}
+        )
+        self.assertEqual(status, 201)
+        aid = created["id"]
+        status, event = self.client.request(
+            "POST", f"/api/animals/{aid}/events",
+            {
+                "type": "vaccination",
+                "title": "Annual booster",
+                "vaccineName": "FMD Vaccine",
+                "occurredAt": "2026-12-01",
+                "nextVaccineDate": "2027-12-01",
+                "details": "Dose completed"
+            }
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(event["animalTag"], created["tag"])
+        self.assertEqual(event["animalName"], "Vaccine Cow")
+        self.assertEqual(event["vaccineName"], "FMD Vaccine")
+
+        status, animal = self.client.request("GET", f"/api/animals/{aid}")
+        self.assertEqual(status, 200)
+        self.assertEqual(animal["vaccineName"], "FMD Vaccine")
+        self.assertEqual(animal["lastVaccineDate"], "2026-12-01")
+        self.assertEqual(animal["nextVaccineDate"], "2027-12-01")
+
+        status, events = self.client.request("GET", f"/api/animals/{aid}/events")
+        self.assertEqual(status, 200)
+        self.assertEqual(events[0]["vaccineName"], "FMD Vaccine")
+        self.client.request("DELETE", f"/api/animals/{aid}")
+
 
 
 if __name__ == "__main__":

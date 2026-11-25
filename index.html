@@ -218,7 +218,9 @@
               <option value="movement">Movement</option>
             </select>
             <input id="eventTitle" maxlength="80" placeholder="Short title" required>
+            <input id="eventVaccineName" maxlength="70" placeholder="Vaccination name">
             <input id="eventDate" type="date" required>
+            <input id="eventNextVaccineDate" type="date" aria-label="Next vaccination date">
             <textarea id="eventDetails" maxlength="500" rows="2" placeholder="Dose, outcome, observations..."></textarea>
             <button type="submit" class="primary-button" id="saveEventBtn">＋ Add event</button>
           </form>
@@ -254,7 +256,7 @@
         <input type="hidden" id="animalId">
         <div class="form-grid">
           <div class="field"><label for="animalName">Animal name *</label><input id="animalName" required maxlength="50"></div>
-          <div class="field"><label for="animalTag">Animal ID *</label><input id="animalTag" required maxlength="30"></div>
+          <div class="field"><label for="animalTag">Unique ID</label><input id="animalTag" readonly maxlength="30" placeholder="Generated automatically"></div>
           <div class="field"><label for="animalBreed">Breed</label><input id="animalBreed" maxlength="50"></div>
           <div class="field"><label for="animalDob">Date of birth</label><input id="animalDob" type="date"></div>
           <div class="field"><label for="animalHealth">Health status</label><select id="animalHealth"><option>Healthy</option><option>Needs attention</option></select></div>
